@@ -2,15 +2,30 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:gravity="center"
     android:orientation="vertical"
-    android:gravity="center">
+    android:padding="24dp">
 
     <TextView
+        android:id="@+id/tvStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="SmsGpsTracker avviato"
-        android:textSize="18sp" />
+        android:text="Servizio: NON ATTIVO"
+        android:textSize="18sp"
+        android:paddingBottom="16dp" />
+
+    <TextView
+        android:id="@+id/tvPermissions"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Permessi: MANCANTI"
+        android:textSize="16sp"
+        android:paddingBottom="24dp" />
+
+    <Button
+        android:id="@+id/btnToggle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ATTIVA SERVIZIO" />
 
 </LinearLayout>
-
-

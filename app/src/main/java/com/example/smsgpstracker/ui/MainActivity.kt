@@ -1,35 +1,93 @@
 package com.example.smsgpstracker.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import android.widget.Button
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.example.smsgpstracker.R
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
+
+    private var serviceActive = false
+    private val PERMISSION_REQUEST_CODE = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
 
-        setContent {
-            MainScreen()
+        val tvStatus = findViewById<TextView>(R.id.tvStatus)
+        val tvPermissions = findViewById<TextView>(R.id.tvPermissions)
+        val btnToggle = findViewById<Button>(R.id.btnToggle)
+
+        updatePermissionStatus(tvPermissions)
+
+        btnToggle.setOnClickListener {
+
+            if (!hasAllPermissions()) {
+                requestPermissions()
+                return@setOnClickListener
+            }
+
+            serviceActive = !serviceActive
+
+            if (serviceActive) {
+                tvStatus.text = "Servizio: ATTIVO"
+                btnToggle.text = "DISATTIVA SERVIZIO"
+            } else {
+                tvStatus.text = "Servizio: NON ATTIVO"
+                btnToggle.text = "ATTIVA SERVIZIO"
+            }
         }
     }
-}
 
-@Composable
-fun MainScreen() {
-    MaterialTheme {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(text = "SmsGpsTracker avviata ✅")
+    private fun hasAllPermissions(): Boolean {
+        val permissions = arrayOf(
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        return permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requestPermissions() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(
+                Manifest.permission.RECEIVE_SMS,
+                Manifest.permission.READ_SMS,
+                Manifest.permission.SEND_SMS,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ),
+            PERMISSION_REQUEST_CODE
+        )
+    }
+
+    private fun updatePermissionStatus(tv: TextView) {
+        tv.text = if (hasAllPermissions()) {
+            "Permessi: CONCESSI"
+        } else {
+            "Permessi: MANCANTI"
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            val tvPermissions = findViewById<TextView>(R.id.tvPermissions)
+            updatePermissionStatus(tvPermissions)
         }
     }
 }
