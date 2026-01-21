@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- PERMESSI -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="true"
@@ -14,6 +16,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SmsGpsTracker">
 
+        <!-- MAIN ACTIVITY -->
         <activity
             android:name="com.example.smsgpstracker.ui.MainActivity"
             android:exported="true">
@@ -23,18 +26,32 @@
             </intent-filter>
         </activity>
 
+        <!-- FOREGROUND SERVICE -->
+        <service
+            android:name="com.example.smsgpstracker.service.TrackerService"
+            android:foregroundServiceType="location|dataSync"
+            android:exported="false" />
+
+        <!-- SMS RECEIVER -->
         <receiver
             android:name="com.example.smsgpstracker.receiver.SmsReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
-
+            android:permission="android.permission.BROADCAST_SMS"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
 
+        <!-- BOOT RECEIVER -->
+        <receiver
+            android:name="com.example.smsgpstracker.receiver.BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 
 </manifest>
-
