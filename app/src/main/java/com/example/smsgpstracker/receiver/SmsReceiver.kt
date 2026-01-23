@@ -5,8 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.telephony.SmsMessage
 import android.util.Log
-import com.example.smsgpstracker.location.LocationRepository
-import android.telephony.SmsManager
+import com.example.smsgpstracker.service.GpsService
+import androidx.core.content.ContextCompat
 
 class SmsReceiver : BroadcastReceiver() {
 
@@ -19,30 +19,16 @@ class SmsReceiver : BroadcastReceiver() {
 
         for (pdu in pdus) {
             val sms = SmsMessage.createFromPdu(pdu as ByteArray)
-            val sender = sms.originatingAddress ?: return
+            val sender = sms.originatingAddress ?: continue
             val message = sms.messageBody.trim().uppercase()
 
             Log.d("SmsReceiver", "SMS da $sender : $message")
 
-            if (message == "GPS?") {
-                val repo = LocationRepository(context)
-
-                repo.getLastLocation { location ->
-                    val response = if (location != null) {
-                        "LAT=${location.latitude}\nLON=${location.longitude}"
-                    } else {
-                        "GPS NON DISPONIBILE"
-                    }
-
-                    SmsManager.getDefault()
-                        .sendTextMessage(sender, null, response, null, null)
-
-                    Log.i("SmsReceiver", "Risposta GPS inviata")
-                }
+            if (message == "GPS") {
+                val serviceIntent = Intent(context, GpsService::class.java)
+                serviceIntent.putExtra("phone", sender)
+                ContextCompat.startForegroundService(context, serviceIntent)
             }
         }
     }
 }
-
-
-

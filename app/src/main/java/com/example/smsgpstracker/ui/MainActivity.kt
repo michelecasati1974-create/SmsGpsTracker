@@ -12,7 +12,6 @@ import com.example.smsgpstracker.R
 
 class MainActivity : AppCompatActivity() {
 
-    private var serviceActive = false
     private val PERMISSION_REQUEST_CODE = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -24,36 +23,28 @@ class MainActivity : AppCompatActivity() {
         val btnToggle = findViewById<Button>(R.id.btnToggle)
 
         updatePermissionStatus(tvPermissions)
+        tvStatus.text = "Servizio: NON ATTIVO"
 
         btnToggle.setOnClickListener {
-
             if (!hasAllPermissions()) {
                 requestPermissions()
                 return@setOnClickListener
             }
 
-            serviceActive = !serviceActive
-
-            if (serviceActive) {
-                tvStatus.text = "Servizio: ATTIVO"
-                btnToggle.text = "DISATTIVA SERVIZIO"
-            } else {
-                tvStatus.text = "Servizio: NON ATTIVO"
-                btnToggle.text = "ATTIVA SERVIZIO"
-            }
+            tvStatus.text = "Servizio: PRONTO"
         }
     }
 
     private fun hasAllPermissions(): Boolean {
         val permissions = arrayOf(
             Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_SMS,
             Manifest.permission.SEND_SMS,
             Manifest.permission.ACCESS_FINE_LOCATION
         )
 
         return permissions.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, it) ==
+                    PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -62,7 +53,6 @@ class MainActivity : AppCompatActivity() {
             this,
             arrayOf(
                 Manifest.permission.RECEIVE_SMS,
-                Manifest.permission.READ_SMS,
                 Manifest.permission.SEND_SMS,
                 Manifest.permission.ACCESS_FINE_LOCATION
             ),
@@ -84,10 +74,9 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            val tvPermissions = findViewById<TextView>(R.id.tvPermissions)
-            updatePermissionStatus(tvPermissions)
+            updatePermissionStatus(findViewById(R.id.tvPermissions))
         }
     }
 }
+
