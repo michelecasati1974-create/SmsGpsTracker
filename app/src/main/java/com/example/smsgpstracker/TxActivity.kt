@@ -11,15 +11,13 @@ import androidx.appcompat.app.AppCompatActivity
 class TxActivity : AppCompatActivity() {
 
     private lateinit var txtStatus: TextView
-    private lateinit var txtCounter: TextView
     private lateinit var inputMaxSms: EditText
     private lateinit var inputInterval: EditText
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
 
     private val handler = Handler(Looper.getMainLooper())
-    private var smsSent = 0
-    private var maxSms = 0
+    private var smsRemaining = 0
     private var intervalMs = 0L
     private var isRunning = false
 
@@ -27,13 +25,16 @@ class TxActivity : AppCompatActivity() {
         override fun run() {
             if (!isRunning) return
 
-            smsSent++
-            txtCounter.text = "SMS inviati: $smsSent / $maxSms"
+            if (smsRemaining > 0) {
+                smsRemaining--
+                txtStatus.text = "TX ATTIVO – SMS rimasti: $smsRemaining"
 
-            if (smsSent >= maxSms) {
-                stopTx()
-            } else {
+                // Simulazione invio SMS (LOG)
+                println("TX → SMS simulato inviato")
+
                 handler.postDelayed(this, intervalMs)
+            } else {
+                stopTx()
             }
         }
     }
@@ -43,7 +44,6 @@ class TxActivity : AppCompatActivity() {
         setContentView(R.layout.activity_tx)
 
         txtStatus = findViewById(R.id.txtStatus)
-        txtCounter = findViewById(R.id.txtCounter)
         inputMaxSms = findViewById(R.id.inputMaxSms)
         inputInterval = findViewById(R.id.inputInterval)
         btnStart = findViewById(R.id.btnStart)
@@ -54,24 +54,22 @@ class TxActivity : AppCompatActivity() {
     }
 
     private fun startTx() {
-        val maxSmsText = inputMaxSms.text.toString()
-        val intervalText = inputInterval.text.toString()
+        if (isRunning) return
 
-        if (maxSmsText.isEmpty() || intervalText.isEmpty()) {
-            txtStatus.text = "Inserisci tutti i valori"
+        val maxSms = inputMaxSms.text.toString().toIntOrNull()
+        val intervalSec = inputInterval.text.toString().toLongOrNull()
+
+        if (maxSms == null || intervalSec == null || maxSms <= 0 || intervalSec <= 0) {
+            txtStatus.text = "Parametri non validi"
             return
         }
 
-        maxSms = maxSmsText.toInt()
-        intervalMs = intervalText.toLong() * 60_000 // minuti → ms
-
-        smsSent = 0
+        smsRemaining = maxSms
+        intervalMs = intervalSec * 1000 // per test usiamo secondi
         isRunning = true
 
-        txtStatus.text = "TX ATTIVO"
-        txtCounter.text = "SMS inviati: 0 / $maxSms"
-
-        handler.postDelayed(txRunnable, intervalMs)
+        txtStatus.text = "TX ATTIVO – SMS rimasti: $smsRemaining"
+        handler.post(txRunnable)
     }
 
     private fun stopTx() {
@@ -79,6 +77,12 @@ class TxActivity : AppCompatActivity() {
         handler.removeCallbacks(txRunnable)
         txtStatus.text = "TX FERMO"
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacks(txRunnable)
+    }
 }
+
 
 
