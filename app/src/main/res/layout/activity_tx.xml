@@ -3,23 +3,23 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:padding="16dp">
 
     <TextView
-        android:layout_width="wrap_content"
+        android:id="@+id/txtStatus"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Modalità TRASMETTITORE"
-        android:textSize="20sp"
+        android:text="TX FERMO"
+        android:textSize="18sp"
         android:textStyle="bold"
-        android:layout_marginBottom="24dp"/>
+        android:paddingBottom="16dp"/>
 
     <EditText
         android:id="@+id/inputMaxSms"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:hint="Numero massimo SMS"
-        android:inputType="number"
-        android:layout_marginBottom="16dp"/>
+        android:inputType="number"/>
 
     <EditText
         android:id="@+id/inputInterval"
@@ -27,18 +27,19 @@
         android:layout_height="wrap_content"
         android:hint="Intervallo (minuti)"
         android:inputType="number"
-        android:layout_marginBottom="24dp"/>
+        android:layout_marginTop="8dp"/>
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="START"/>
+        android:text="START"
+        android:layout_marginTop="16dp"/>
 
-    <TextView
-        android:id="@+id/txtStatus"
-        android:layout_width="wrap_content"
+    <Button
+        android:id="@+id/btnStop"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="STATO: STOP"
-        android:layout_marginTop="24dp"/>
+        android:text="STOP"
+        android:layout_marginTop="8dp"/>
 </LinearLayout>
