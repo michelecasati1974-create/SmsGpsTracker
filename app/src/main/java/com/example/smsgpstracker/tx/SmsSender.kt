@@ -9,9 +9,9 @@ object SmsSender {
         try {
             val smsManager = SmsManager.getDefault()
             smsManager.sendTextMessage(phoneNumber, null, message, null, null)
-            Log.d("TX_SMS", "SMS inviato a $phoneNumber")
+            Log.d("TX_SMS", "SMS inviato a $phoneNumber: $message")
         } catch (e: Exception) {
-            Log.e("TX_SMS", "Errore invio SMS", e)
+            Log.e("TX_SMS", "Errore invio SMS a $phoneNumber", e)
         }
     }
 }
