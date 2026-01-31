@@ -11,6 +11,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.util.Log
 import com.example.smsgpstracker.tx.GpsHelper
+import com.example.smsgpstracker.tx.NotificationHelper
+
 
 class MainActivity : AppCompatActivity() {
 
@@ -26,20 +28,22 @@ class MainActivity : AppCompatActivity() {
         // Inizializza helper GPS
         GpsHelper.init(this)
 
+        // 🔔 INIZIALIZZA CANALE NOTIFICHE (QUI)
+        NotificationHelper.createChannel(this)
+
         val btnTx = findViewById<Button>(R.id.btnTx)
         val btnRx = findViewById<Button>(R.id.btnRx)
 
-        // MODALITÀ TRASMISSIONE
         btnTx.setOnClickListener {
             startActivity(Intent(this, TxActivity::class.java))
         }
 
-        // MODALITÀ RICEZIONE
         btnRx.setOnClickListener {
             Toast.makeText(this, "Modalità RX attiva", Toast.LENGTH_SHORT).show()
             startActivity(Intent(this, RxActivity::class.java))
         }
     }
+
 
     private fun checkAndRequestSmsPermissions() {
         val permissions = arrayOf(

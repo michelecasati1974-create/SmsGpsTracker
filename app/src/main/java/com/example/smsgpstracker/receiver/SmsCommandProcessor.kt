@@ -4,12 +4,13 @@ import android.content.Context
 import android.util.Log
 import com.example.smsgpstracker.tx.SmsSender
 import com.example.smsgpstracker.tx.GpsHelper
+import com.example.smsgpstracker.tx.NotificationHelper
 
 object SmsCommandProcessor {
 
     private val authorizedNumbers = arrayOf(
-        "+393394983827", // Tuo numero
-        "+393486933859"  // Altro numero autorizzato
+        "+393394983827",
+        "+393486933859"
     )
 
     private const val COMMAND_PIN = "1234"
@@ -26,16 +27,25 @@ object SmsCommandProcessor {
 
         if (!isAuthorized(sender)) {
             Log.d("RX_CMD", "Numero non autorizzato: $sender")
+            NotificationHelper.showNotification(
+                context,
+                "SMS ignorato",
+                "Numero non autorizzato: $sender"
+            )
             return
         }
 
         val msg = message.trim().uppercase()
 
-        // Controllo PIN se presente
         if (msg.contains(":")) {
             val parts = msg.split(":")
             if (parts.size == 2 && parts[1] != COMMAND_PIN) {
                 Log.d("RX_CMD", "PIN errato da $sender")
+                NotificationHelper.showNotification(
+                    context,
+                    "PIN errato",
+                    "Messaggio ricevuto da $sender con PIN errato"
+                )
                 return
             }
         }
@@ -45,8 +55,12 @@ object SmsCommandProcessor {
         when (command) {
             "GPS" -> {
                 Log.d("RX_CMD", "Comando GPS ricevuto da $sender")
+                NotificationHelper.showNotification(
+                    context,
+                    "Comando GPS",
+                    "Ricevuto da $sender"
+                )
 
-                // Ottieni posizione reale e invia SMS
                 GpsHelper.getCurrentLocation { lat, lon ->
                     val gpsMsg = if (lat != 0.0 && lon != 0.0)
                         "Posizione: lat $lat, lon $lon"
@@ -54,25 +68,49 @@ object SmsCommandProcessor {
                         "Impossibile recuperare posizione"
 
                     SmsSender.sendSms(sender, gpsMsg)
+
+                    NotificationHelper.showNotification(
+                        context,
+                        "Risposta inviata",
+                        gpsMsg
+                    )
                 }
             }
 
             "STATUS" -> {
                 Log.d("RX_CMD", "Comando STATUS ricevuto da $sender")
                 SmsSender.sendSms(sender, "SmsGpsTracker attivo e funzionante")
+
+                NotificationHelper.showNotification(
+                    context,
+                    "Comando STATUS",
+                    "Risposta inviata a $sender"
+                )
             }
 
             "PING" -> {
                 Log.d("RX_CMD", "Comando PING ricevuto da $sender")
                 SmsSender.sendSms(sender, "PONG")
+
+                NotificationHelper.showNotification(
+                    context,
+                    "Comando PING",
+                    "Risposta PONG inviata a $sender"
+                )
             }
 
             else -> {
                 Log.d("RX_CMD", "Comando sconosciuto da $sender")
+                NotificationHelper.showNotification(
+                    context,
+                    "Comando sconosciuto",
+                    "Ricevuto da $sender: $command"
+                )
             }
         }
     }
 }
+
 
 
 
