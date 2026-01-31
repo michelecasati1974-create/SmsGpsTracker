@@ -3,8 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- PERMESSI SMS -->
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false"/>
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS"/>
+
 
     <application
         android:allowBackup="true"

@@ -2,7 +2,7 @@ package com.example.smsgpstracker.receiver
 
 import android.content.Context
 import android.util.Log
-import android.widget.Toast
+import com.example.smsgpstracker.tx.SmsSender
 
 object SmsCommandProcessor {
 
@@ -13,19 +13,27 @@ object SmsCommandProcessor {
         when (command) {
 
             "GPS" -> {
-                Log.d("RX_CMD", "Comando GPS ricevuto da $sender")
-                Toast.makeText(context, "CMD GPS", Toast.LENGTH_SHORT).show()
-                // STEP 5.5 → risposta SMS
+                Log.d("RX_CMD", "Comando GPS ricevuto")
+                SmsSender.sendSms(
+                    sender,
+                    "GPS request ricevuto. Posizione in elaborazione..."
+                )
             }
 
             "STATUS" -> {
                 Log.d("RX_CMD", "Comando STATUS ricevuto")
-                Toast.makeText(context, "CMD STATUS", Toast.LENGTH_SHORT).show()
+                SmsSender.sendSms(
+                    sender,
+                    "SmsGpsTracker attivo e funzionante"
+                )
             }
 
             "PING" -> {
                 Log.d("RX_CMD", "Comando PING ricevuto")
-                Toast.makeText(context, "CMD PING", Toast.LENGTH_SHORT).show()
+                SmsSender.sendSms(
+                    sender,
+                    "PONG"
+                )
             }
 
             else -> {
@@ -34,4 +42,5 @@ object SmsCommandProcessor {
         }
     }
 }
+
 
