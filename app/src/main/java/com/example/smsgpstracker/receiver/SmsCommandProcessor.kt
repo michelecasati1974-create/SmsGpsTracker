@@ -3,8 +3,24 @@ package com.example.smsgpstracker.receiver
 import android.content.Context
 import android.util.Log
 import com.example.smsgpstracker.tx.SmsSender
+import com.example.smsgpstracker.tx.GpsHelper
 
 object SmsCommandProcessor {
+
+    private val authorizedNumbers = arrayOf(
+        "+393394983827", // Tuo numero
+        "+393486933859"  // Altro numero autorizzato
+    )
+
+    private const val COMMAND_PIN = "1234"
+
+    private fun isAuthorized(sender: String): Boolean {
+        return authorizedNumbers.contains(sender)
+    }
+
+    private fun checkPin(message: String): Boolean {
+        return message.contains(":$COMMAND_PIN")
+    }
 
     fun process(context: Context, sender: String, message: String) {
 
@@ -15,7 +31,7 @@ object SmsCommandProcessor {
 
         val msg = message.trim().uppercase()
 
-        // Controllo PIN facoltativo per comandi sensibili
+        // Controllo PIN se presente
         if (msg.contains(":")) {
             val parts = msg.split(":")
             if (parts.size == 2 && parts[1] != COMMAND_PIN) {
@@ -29,7 +45,16 @@ object SmsCommandProcessor {
         when (command) {
             "GPS" -> {
                 Log.d("RX_CMD", "Comando GPS ricevuto da $sender")
-                SmsSender.sendSms(sender, "GPS request ricevuto. Posizione in elaborazione...")
+
+                // Ottieni posizione reale e invia SMS
+                GpsHelper.getCurrentLocation { lat, lon ->
+                    val gpsMsg = if (lat != 0.0 && lon != 0.0)
+                        "Posizione: lat $lat, lon $lon"
+                    else
+                        "Impossibile recuperare posizione"
+
+                    SmsSender.sendSms(sender, gpsMsg)
+                }
             }
 
             "STATUS" -> {
@@ -47,18 +72,7 @@ object SmsCommandProcessor {
             }
         }
     }
+}
 
-}
-private val authorizedNumbers = arrayOf(
-    "+393394983827", // Tuo numero
-    "+393486933859" // Altro numero autorizzato
-)
-private fun isAuthorized(sender: String): Boolean {
-    return authorizedNumbers.contains(sender)
-}
-private const val COMMAND_PIN = "1234"
-private fun checkPin(message: String): Boolean {
-    return message.contains(":$COMMAND_PIN")
-}
 
 

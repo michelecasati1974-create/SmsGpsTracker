@@ -10,16 +10,21 @@ import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.util.Log
-
-
+import com.example.smsgpstracker.tx.GpsHelper
 
 class MainActivity : AppCompatActivity() {
+
+    private val SMS_PERMISSION_CODE = 101
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Controllo e richiesta permessi SMS + GPS
         checkAndRequestSmsPermissions()
+
+        // Inizializza helper GPS
+        GpsHelper.init(this)
 
         val btnTx = findViewById<Button>(R.id.btnTx)
         val btnRx = findViewById<Button>(R.id.btnRx)
@@ -34,16 +39,14 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Modalità RX attiva", Toast.LENGTH_SHORT).show()
             startActivity(Intent(this, RxActivity::class.java))
         }
-
     }
 
-    private val SMS_PERMISSION_CODE = 101
-
     private fun checkAndRequestSmsPermissions() {
-
         val permissions = arrayOf(
             Manifest.permission.SEND_SMS,
-            Manifest.permission.RECEIVE_SMS
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
 
         val missingPermissions = permissions.filter {
@@ -58,6 +61,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
     }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -67,13 +71,12 @@ class MainActivity : AppCompatActivity() {
 
         if (requestCode == SMS_PERMISSION_CODE) {
             if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                Log.d("PERMISSION", "Permessi SMS concessi")
+                Log.d("PERMISSION", "Permessi SMS e GPS concessi")
             } else {
-                Log.e("PERMISSION", "Permessi SMS NEGATI")
+                Log.e("PERMISSION", "Permessi negati")
             }
         }
     }
-
-
 }
+
 
