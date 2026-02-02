@@ -5,6 +5,9 @@ import android.util.Log
 import com.example.smsgpstracker.tx.SmsSender
 import com.example.smsgpstracker.tx.GpsHelper
 import com.example.smsgpstracker.tx.NotificationHelper
+import com.example.smsgpstracker.model.GpsTrackPoint
+import com.example.smsgpstracker.repository.GpsTrackRepository
+
 
 object SmsCommandProcessor {
 
@@ -55,6 +58,7 @@ object SmsCommandProcessor {
         when (command) {
             "GPS" -> {
                 Log.d("RX_CMD", "Comando GPS ricevuto da $sender")
+
                 NotificationHelper.showNotification(
                     context,
                     "Comando GPS",
@@ -62,6 +66,17 @@ object SmsCommandProcessor {
                 )
 
                 GpsHelper.getCurrentLocation { lat, lon ->
+
+                    val point = GpsTrackPoint(
+                        timestamp = System.currentTimeMillis(),
+                        sender = sender,
+                        latitude = lat,
+                        longitude = lon
+                    )
+
+                    // 🔴 SALVA PUNTO GPS
+                    GpsTrackRepository.addPoint(point)
+
                     val gpsMsg = if (lat != 0.0 && lon != 0.0)
                         "Posizione: lat $lat, lon $lon"
                     else
@@ -71,11 +86,12 @@ object SmsCommandProcessor {
 
                     NotificationHelper.showNotification(
                         context,
-                        "Risposta inviata",
+                        "Risposta GPS inviata",
                         gpsMsg
                     )
                 }
             }
+
 
             "STATUS" -> {
                 Log.d("RX_CMD", "Comando STATUS ricevuto da $sender")
