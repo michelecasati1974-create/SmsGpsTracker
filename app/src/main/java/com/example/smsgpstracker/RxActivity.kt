@@ -7,10 +7,18 @@ import android.content.IntentFilter
 import android.os.Bundle
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.OnMapReadyCallback
+import com.google.android.gms.maps.SupportMapFragment
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MarkerOptions
+import com.google.android.gms.maps.model.Polyline
+import com.google.android.gms.maps.model.PolylineOptions
 import com.google.gson.Gson
 import java.io.File
 
-class RxActivity : AppCompatActivity() {
+class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
@@ -18,6 +26,10 @@ class RxActivity : AppCompatActivity() {
 
     private val trackPoints = mutableListOf<GpsPoint>()
     private lateinit var trackFile: File
+
+    // MAPPA
+    private lateinit var googleMap: GoogleMap
+    private var polyline: Polyline? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,6 +44,11 @@ class RxActivity : AppCompatActivity() {
 
         txtStatus.text = "RX IN ATTESA"
 
+        // MAPPA
+        val mapFragment =
+            supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
+        mapFragment.getMapAsync(this)
+
         // 📡 REGISTRA BROADCAST GPS
         registerReceiver(
             gpsReceiver,
@@ -42,6 +59,14 @@ class RxActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(gpsReceiver)
+    }
+
+    // ======================
+    // 🗺️ MAP READY
+    // ======================
+    override fun onMapReady(map: GoogleMap) {
+        googleMap = map
+        redrawTrack()
     }
 
     // ======================
@@ -62,7 +87,40 @@ class RxActivity : AppCompatActivity() {
             txtStatus.text = "RX ATTIVO"
             txtCount.text = "Punti ricevuti: ${trackPoints.size}"
             txtLast.text = "Ultima posizione: $lat , $lon"
+
+            redrawTrack()
         }
+    }
+
+    // ======================
+    // 🧵 DISEGNO TRACCIA
+    // ======================
+    private fun redrawTrack() {
+        if (!::googleMap.isInitialized || trackPoints.isEmpty()) return
+
+        googleMap.clear()
+
+        val latLngs = trackPoints.map {
+            LatLng(it.lat, it.lon)
+        }
+
+        polyline = googleMap.addPolyline(
+            PolylineOptions()
+                .addAll(latLngs)
+                .width(6f)
+        )
+
+        val last = latLngs.last()
+
+        googleMap.addMarker(
+            MarkerOptions()
+                .position(last)
+                .title("Ultima posizione")
+        )
+
+        googleMap.moveCamera(
+            CameraUpdateFactory.newLatLngZoom(last, 16f)
+        )
     }
 
     // ======================

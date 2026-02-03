@@ -25,6 +25,9 @@
         android:theme="@style/Theme.SmsGpsTracker">
 
         <!-- MAIN -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyBZioq1zDU58T4hb1vPrHkwjG5p1q5PyL8" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -60,6 +63,7 @@
 
 
     </application>
+
 
 
 
