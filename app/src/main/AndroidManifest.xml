@@ -46,7 +46,7 @@
 
         <!-- SMS RECEIVER -->
         <receiver
-            android:name=".receiver.SmsReceiver"
+            android:name=".SmsReceiver"
             android:permission="android.permission.BROADCAST_SMS"
             android:exported="true">
             <intent-filter>
