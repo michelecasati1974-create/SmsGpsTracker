@@ -1,4 +1,4 @@
-package com.example.smsgpstracker.receiver
+package com.example.smsgpstracker
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.telephony.SmsMessage
 import android.util.Log
+import com.example.smsgpstracker.receiver.SmsReceiverService
 
 class SmsReceiver : BroadcastReceiver() {
 
@@ -30,4 +31,3 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 }
-
