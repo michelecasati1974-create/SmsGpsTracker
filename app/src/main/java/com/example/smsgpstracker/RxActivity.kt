@@ -17,9 +17,14 @@ import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import com.google.gson.Gson
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
-
+    private val dateFormatter =
+        SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
@@ -77,16 +82,20 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
             val lat = intent?.getDoubleExtra("lat", 0.0) ?: return
             val lon = intent.getDoubleExtra("lon", 0.0)
-            val time = intent.getLongExtra("time", 0)
-
-            val point = GpsPoint(lat, lon, time)
+            val timestamp = System.currentTimeMillis()
+            val point = GpsPoint(lat, lon, timestamp)
             trackPoints.add(point)
 
             saveTrackToFile()
 
             txtStatus.text = "RX ATTIVO"
             txtCount.text = "Punti ricevuti: ${trackPoints.size}"
-            txtLast.text = "Ultima posizione: $lat , $lon"
+            val formattedTime = dateFormatter.format(Date(timestamp))
+
+            txtLast.text =
+                "Ultima posizione:\n" +
+                        "$lat , $lon\n" +
+                        formattedTime
 
             redrawTrack()
         }
@@ -142,6 +151,15 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         val loaded = Gson().fromJson(json, Array<GpsPoint>::class.java)
         trackPoints.addAll(loaded)
         txtCount.text = "Punti ricevuti: ${trackPoints.size}"
+        if (trackPoints.isNotEmpty()) {
+            val last = trackPoints.last()
+            val formattedTime = dateFormatter.format(Date(last.timestamp))
+
+            txtLast.text =
+                "Ultima posizione:\n" +
+                        "${last.lat} , ${last.lon}\n" +
+                        formattedTime
+        }
     }
 }
 
