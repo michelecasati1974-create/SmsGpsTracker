@@ -20,9 +20,48 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import android.graphics.*
+
 
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
+
+    private fun saveMapSnapshot(googleMap: GoogleMap) {
+
+        googleMap.snapshot { bitmap ->
+
+            if (bitmap == null) return@snapshot
+
+            val mutableBitmap =
+                bitmap.copy(Bitmap.Config.ARGB_8888, true)
+
+            val canvas = Canvas(mutableBitmap)
+            val paint = Paint().apply {
+                color = Color.WHITE
+                textSize = 36f
+                isAntiAlias = true
+                setShadowLayer(2f, 1f, 1f, Color.BLACK)
+            }
+
+            val last = trackPoints.lastOrNull() ?: return@snapshot
+            val formattedTime =
+                dateFormatter.format(java.util.Date(last.timestamp))
+
+            val text =
+                "Ultima posizione:\n" +
+                        "${last.lat}, ${last.lon}\n" +
+                        formattedTime
+
+            var y = 50f
+            text.split("\n").forEach {
+                canvas.drawText(it, 20f, y, paint)
+                y += 45f
+            }
+
+            saveBitmapToFile(mutableBitmap)
+        }
+    }
+
     private val dateFormatter =
         SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
     private lateinit var txtStatus: TextView
@@ -60,6 +99,19 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             IntentFilter("com.example.smsgpstracker.GPS_POINT")
         )
     }
+    private fun saveBitmapToFile(bitmap: Bitmap) {
+
+        val dir = File(getExternalFilesDir(null), "snapshots")
+        if (!dir.exists()) dir.mkdirs()
+
+        val filename = "track_${System.currentTimeMillis()}.jpg"
+        val file = File(dir, filename)
+
+        file.outputStream().use {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
+        }
+    }
+
 
     override fun onDestroy() {
         super.onDestroy()
