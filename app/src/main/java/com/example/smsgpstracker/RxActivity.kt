@@ -4,76 +4,39 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.example.smsgpstracker.repository.GpsTrackRepository
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MarkerOptions
-import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
-import com.google.gson.Gson
-import java.io.File
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import android.graphics.*
-
-
+import java.util.*
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
-    private fun saveMapSnapshot(googleMap: GoogleMap) {
+    private lateinit var googleMap: GoogleMap
 
-        googleMap.snapshot { bitmap ->
-
-            if (bitmap == null) return@snapshot
-
-            val mutableBitmap =
-                bitmap.copy(Bitmap.Config.ARGB_8888, true)
-
-            val canvas = Canvas(mutableBitmap)
-            val paint = Paint().apply {
-                color = Color.WHITE
-                textSize = 36f
-                isAntiAlias = true
-                setShadowLayer(2f, 1f, 1f, Color.BLACK)
-            }
-
-            val last = trackPoints.lastOrNull() ?: return@snapshot
-            val formattedTime =
-                dateFormatter.format(java.util.Date(last.timestamp))
-
-            val text =
-                "Ultima posizione:\n" +
-                        "${last.lat}, ${last.lon}\n" +
-                        formattedTime
-
-            var y = 50f
-            text.split("\n").forEach {
-                canvas.drawText(it, 20f, y, paint)
-                y += 45f
-            }
-
-            saveBitmapToFile(mutableBitmap)
-        }
-    }
-
-    private val dateFormatter =
-        SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
 
-    private val trackPoints = mutableListOf<GpsPoint>()
-    private lateinit var trackFile: File
+    private val dateFormatter =
+        SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
 
-    // MAPPA
-    private lateinit var googleMap: GoogleMap
-    private var polyline: Polyline? = null
+    private val rxReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != SmsCommandProcessor.ACTION_NEW_POSITION) return
+            updateTextUi()
+            redrawMap()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,136 +46,89 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtCount = findViewById(R.id.txtCount)
         txtLast = findViewById(R.id.txtLast)
 
-        initTrackFile()
-        loadExistingTrack()
-
-        txtStatus.text = "RX IN ATTESA"
-
-        // MAPPA
         val mapFragment =
-            supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
+            supportFragmentManager.findFragmentById(R.id.map)
+                    as SupportMapFragment
         mapFragment.getMapAsync(this)
-
-        // 📡 REGISTRA BROADCAST GPS
-        registerReceiver(
-            gpsReceiver,
-            IntentFilter("com.example.smsgpstracker.GPS_POINT")
-        )
     }
-    private fun saveBitmapToFile(bitmap: Bitmap) {
 
-        val dir = File(getExternalFilesDir(null), "snapshots")
-        if (!dir.exists()) dir.mkdirs()
+    override fun onStart() {
+        super.onStart()
 
-        val filename = "track_${System.currentTimeMillis()}.jpg"
-        val file = File(dir, filename)
+        val filter =
+            IntentFilter(SmsCommandProcessor.ACTION_NEW_POSITION)
 
-        file.outputStream().use {
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                rxReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            registerReceiver(rxReceiver, filter)
         }
+
+        updateTextUi()
     }
 
-
-    override fun onDestroy() {
-        super.onDestroy()
-        unregisterReceiver(gpsReceiver)
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(rxReceiver)
     }
 
-    // ======================
-    // 🗺️ MAP READY
-    // ======================
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
-        redrawTrack()
+        redrawMap()
     }
 
-    // ======================
-    // 📡 GPS RECEIVER
-    // ======================
-    private val gpsReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-
-            val lat = intent?.getDoubleExtra("lat", 0.0) ?: return
-            val lon = intent.getDoubleExtra("lon", 0.0)
-            val timestamp = System.currentTimeMillis()
-            val point = GpsPoint(lat, lon, timestamp)
-            trackPoints.add(point)
-
-            saveTrackToFile()
-
-            txtStatus.text = "RX ATTIVO"
-            txtCount.text = "Punti ricevuti: ${trackPoints.size}"
-            val formattedTime = dateFormatter.format(Date(timestamp))
-
-            txtLast.text =
-                "Ultima posizione:\n" +
-                        "$lat , $lon\n" +
-                        formattedTime
-
-            redrawTrack()
-        }
-    }
-
-    // ======================
-    // 🧵 DISEGNO TRACCIA
-    // ======================
-    private fun redrawTrack() {
-        if (!::googleMap.isInitialized || trackPoints.isEmpty()) return
+    private fun redrawMap() {
+        if (!::googleMap.isInitialized) return
 
         googleMap.clear()
 
-        val latLngs = trackPoints.map {
-            LatLng(it.lat, it.lon)
+        val polylineOptions = PolylineOptions().width(6f)
+        val points = GpsTrackRepository.getAllPoints()
+
+        points.forEachIndexed { index, p ->
+            val latLng = LatLng(p.latitude, p.longitude)
+
+            googleMap.addMarker(
+                MarkerOptions()
+                    .position(latLng)
+                    .title("Punto ${index + 1}")
+            )
+
+            polylineOptions.add(latLng)
         }
 
-        polyline = googleMap.addPolyline(
-            PolylineOptions()
-                .addAll(latLngs)
-                .width(6f)
-        )
+        if (points.isNotEmpty()) {
+            googleMap.addPolyline(polylineOptions)
 
-        val last = latLngs.last()
-
-        googleMap.addMarker(
-            MarkerOptions()
-                .position(last)
-                .title("Ultima posizione")
-        )
-
-        googleMap.moveCamera(
-            CameraUpdateFactory.newLatLngZoom(last, 16f)
-        )
+            val last = points.last()
+            googleMap.moveCamera(
+                CameraUpdateFactory.newLatLngZoom(
+                    LatLng(last.latitude, last.longitude),
+                    15f
+                )
+            )
+        }
     }
 
-    // ======================
-    // 💾 FILE
-    // ======================
-    private fun initTrackFile() {
-        val dir = File(getExternalFilesDir(null), "tracks")
-        if (!dir.exists()) dir.mkdirs()
-        trackFile = File(dir, "track.json")
-    }
+    private fun updateTextUi() {
 
-    private fun saveTrackToFile() {
-        trackFile.writeText(Gson().toJson(trackPoints))
-    }
+        txtStatus.text = "RX ATTIVO"
+        txtCount.text =
+            "Punti ricevuti: ${GpsTrackRepository.size()}"
 
-    private fun loadExistingTrack() {
-        if (!trackFile.exists()) return
-        val json = trackFile.readText()
-        val loaded = Gson().fromJson(json, Array<GpsPoint>::class.java)
-        trackPoints.addAll(loaded)
-        txtCount.text = "Punti ricevuti: ${trackPoints.size}"
-        if (trackPoints.isNotEmpty()) {
-            val last = trackPoints.last()
-            val formattedTime = dateFormatter.format(Date(last.timestamp))
+        val last = GpsTrackRepository.lastPoint()
 
-            txtLast.text =
+        txtLast.text =
+            if (last != null) {
                 "Ultima posizione:\n" +
-                        "${last.lat} , ${last.lon}\n" +
-                        formattedTime
-        }
+                        "${last.latitude}, ${last.longitude}\n" +
+                        dateFormatter.format(Date(last.timestamp))
+            } else {
+                "Ultima posizione: --"
+            }
     }
 }
-
-

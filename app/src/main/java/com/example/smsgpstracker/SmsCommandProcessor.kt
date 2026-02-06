@@ -3,68 +3,46 @@ package com.example.smsgpstracker
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import com.example.smsgpstracker.tx.NotificationHelper
-import com.example.smsgpstracker.tx.SmsSender
+import com.example.smsgpstracker.model.GpsTrackPoint
+import com.example.smsgpstracker.repository.GpsTrackRepository
 
 object SmsCommandProcessor {
 
-    private val authorizedNumbers = arrayOf(
-        "+393394983827",
-        "+393486933859"
-    )
+    const val ACTION_NEW_POSITION =
+        "com.example.smsgpstracker.ACTION_NEW_POSITION"
 
-    private const val COMMAND_PIN = "1234"
+    fun process(context: Context, sender: String, body: String) {
 
-    private fun isAuthorized(sender: String): Boolean {
-        return authorizedNumbers.contains(sender)
-    }
+        val text = body.trim().uppercase()
 
-    fun process(context: Context, sender: String, message: String) {
+        val regex =
+            Regex("""GPS[:\s]+(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)""")
 
-        if (!isAuthorized(sender)) {
-            NotificationHelper.showNotification(
-                context,
-                "SMS ignorato",
-                "Numero non autorizzato: $sender"
-            )
-            return
+        val match = regex.find(text) ?: return
+
+        val latitude = match.groupValues[1].toDouble()
+        val longitude = match.groupValues[3].toDouble()
+
+        Log.d("SMS_RX", "Coordinate ricevute: $latitude , $longitude")
+
+        val point = GpsTrackPoint(
+            sender = sender,
+            latitude = latitude,
+            longitude = longitude,
+            timestamp = System.currentTimeMillis()
+        )
+
+        GpsTrackRepository.addPoint(point)
+
+        val intent = Intent(ACTION_NEW_POSITION).apply {
+            setPackage(context.packageName)
         }
 
-        val msg = message.trim().uppercase()
-        val command = msg.substringBefore(":")
-
-        when (command) {
-
-            "GPS" -> {
-                Log.d("RX_CMD", "Comando GPS ricevuto")
-
-                val data = msg.substringAfter("GPS").replace(":", "")
-                val parts = data.split(",")
-
-                if (parts.size != 2) return
-
-                val lat = parts[0].toDoubleOrNull() ?: return
-                val lon = parts[1].toDoubleOrNull() ?: return
-
-                // 🔴 BROADCAST STANDARD
-                val intent = Intent("com.example.smsgpstracker.GPS_POINT")
-                intent.putExtra("lat", lat)
-                intent.putExtra("lon", lon)
-                intent.putExtra("time", System.currentTimeMillis())
-
-                context.sendBroadcast(intent)
-
-                SmsSender.sendSms(sender, "GPS ricevuto")
-            }
-
-            "STATUS" -> {
-                SmsSender.sendSms(sender, "SmsGpsTracker attivo")
-            }
-
-            "PING" -> {
-                SmsSender.sendSms(sender, "PONG")
-            }
-        }
+        context.sendBroadcast(intent)
     }
 }
+
+
+
+
 

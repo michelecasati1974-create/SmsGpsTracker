@@ -15,6 +15,14 @@ object GpsTrackRepository {
         return trackPoints.toList()
     }
 
+    fun lastPoint(): GpsTrackPoint? {
+        return trackPoints.lastOrNull()
+    }
+
+    fun size(): Int {
+        return trackPoints.size
+    }
+
     fun clear() {
         trackPoints.clear()
     }
