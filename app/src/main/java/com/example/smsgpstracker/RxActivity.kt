@@ -8,35 +8,22 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.example.smsgpstracker.model.GpsTrackPoint
 import com.example.smsgpstracker.repository.GpsTrackRepository
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.GoogleMap
-import com.google.android.gms.maps.OnMapReadyCallback
-import com.google.android.gms.maps.SupportMapFragment
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MarkerOptions
-import com.google.android.gms.maps.model.PolylineOptions
-import java.text.SimpleDateFormat
-import java.util.*
+import com.google.android.gms.maps.*
+import com.google.android.gms.maps.model.*
+import kotlinx.coroutines.launch
+import androidx.core.content.ContextCompat
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
-
-    private lateinit var googleMap: GoogleMap
 
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
 
-    private val dateFormatter =
-        SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
-
-    private val rxReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != SmsCommandProcessor.ACTION_NEW_POSITION) return
-            updateTextUi()
-            redrawMap()
-        }
-    }
+    private lateinit var googleMap: GoogleMap
+    private val trackPoints = mutableListOf<GpsTrackPoint>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,88 +34,90 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtLast = findViewById(R.id.txtLast)
 
         val mapFragment =
-            supportFragmentManager.findFragmentById(R.id.map)
-                    as SupportMapFragment
+            supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
         mapFragment.getMapAsync(this)
+
+        // 🔄 Caricamento iniziale DB (COROUTINE)
+        loadFromDb()
+
+        // 📡 REGISTRA RECEIVER (Android 7+ safe)
+        val filter = IntentFilter(SmsCommandProcessor.ACTION_NEW_POSITION)
+
+        ContextCompat.registerReceiver(
+            this,
+            gpsReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
-    override fun onStart() {
-        super.onStart()
-
-        val filter =
-            IntentFilter(SmsCommandProcessor.ACTION_NEW_POSITION)
-
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(
-                rxReceiver,
-                filter,
-                Context.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            registerReceiver(rxReceiver, filter)
-        }
-
-        updateTextUi()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        unregisterReceiver(rxReceiver)
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(gpsReceiver)
     }
 
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
-        redrawMap()
+        redrawTrack()
     }
 
-    private fun redrawMap() {
-        if (!::googleMap.isInitialized) return
+    // 📥 DB → memoria
+    private fun loadFromDb() {
+        lifecycleScope.launch {
+            trackPoints.clear()
+            trackPoints.addAll(GpsTrackRepository.getAll(this@RxActivity))
+            updateText()
+            redrawTrack()
+        }
+    }
+
+    // 📡 Ricezione nuovo punto
+    private val gpsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            loadFromDb()
+        }
+    }
+
+    // 🗺️ Disegno mappa
+    private fun redrawTrack() {
+        if (!::googleMap.isInitialized || trackPoints.isEmpty()) return
 
         googleMap.clear()
 
-        val polylineOptions = PolylineOptions().width(6f)
-        val points = GpsTrackRepository.getAllPoints()
-
-        points.forEachIndexed { index, p ->
-            val latLng = LatLng(p.latitude, p.longitude)
-
-            googleMap.addMarker(
-                MarkerOptions()
-                    .position(latLng)
-                    .title("Punto ${index + 1}")
-            )
-
-            polylineOptions.add(latLng)
+        val latLngs = trackPoints.map {
+            LatLng(it.latitude, it.longitude)
         }
 
-        if (points.isNotEmpty()) {
-            googleMap.addPolyline(polylineOptions)
+        googleMap.addPolyline(
+            PolylineOptions()
+                .addAll(latLngs)
+                .width(6f)
+        )
 
-            val last = points.last()
-            googleMap.moveCamera(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(last.latitude, last.longitude),
-                    15f
-                )
-            )
+        latLngs.forEach {
+            googleMap.addMarker(MarkerOptions().position(it))
         }
+
+        googleMap.moveCamera(
+            CameraUpdateFactory.newLatLngZoom(
+                latLngs.last(),
+                16f
+            )
+        )
     }
 
-    private fun updateTextUi() {
-
+    // 🧾 UI
+    private fun updateText() {
         txtStatus.text = "RX ATTIVO"
-        txtCount.text =
-            "Punti ricevuti: ${GpsTrackRepository.size()}"
+        txtCount.text = "Punti ricevuti: ${trackPoints.size}"
 
-        val last = GpsTrackRepository.lastPoint()
-
-        txtLast.text =
-            if (last != null) {
-                "Ultima posizione:\n" +
-                        "${last.latitude}, ${last.longitude}\n" +
-                        dateFormatter.format(Date(last.timestamp))
-            } else {
-                "Ultima posizione: --"
-            }
+        trackPoints.lastOrNull()?.let {
+            txtLast.text = "Ultima posizione:\n${it.latitude}, ${it.longitude}"
+        } ?: run {
+            txtLast.text = "Ultima posizione: --"
+        }
     }
 }
+
+
+

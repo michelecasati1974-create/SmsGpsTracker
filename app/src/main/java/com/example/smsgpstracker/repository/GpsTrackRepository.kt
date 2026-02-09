@@ -1,29 +1,41 @@
 package com.example.smsgpstracker.repository
 
+import android.content.Context
+import com.example.smsgpstracker.db.AppDatabase
 import com.example.smsgpstracker.model.GpsTrackPoint
-import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object GpsTrackRepository {
 
-    private val trackPoints = CopyOnWriteArrayList<GpsTrackPoint>()
+    suspend fun addPoint(
+        context: Context,
+        lat: Double,
+        lon: Double
+    ) = withContext(Dispatchers.IO) {
 
-    fun addPoint(point: GpsTrackPoint) {
-        trackPoints.add(point)
+        val point = GpsTrackPoint(
+            latitude = lat,
+            longitude = lon,
+            timestamp = System.currentTimeMillis()
+        )
+
+        AppDatabase.get(context)
+            .gpsTrackDao()
+            .insert(point)
     }
 
-    fun getAllPoints(): List<GpsTrackPoint> {
-        return trackPoints.toList()
-    }
+    suspend fun getAll(context: Context): List<GpsTrackPoint> =
+        withContext(Dispatchers.IO) {
+            AppDatabase.get(context)
+                .gpsTrackDao()
+                .getAll()
+        }
 
-    fun lastPoint(): GpsTrackPoint? {
-        return trackPoints.lastOrNull()
-    }
-
-    fun size(): Int {
-        return trackPoints.size
-    }
-
-    fun clear() {
-        trackPoints.clear()
-    }
+    suspend fun clear(context: Context) =
+        withContext(Dispatchers.IO) {
+            AppDatabase.get(context)
+                .gpsTrackDao()
+                .clear()
+        }
 }
