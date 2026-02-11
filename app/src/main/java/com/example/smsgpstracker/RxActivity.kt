@@ -1,34 +1,34 @@
 package com.example.smsgpstracker
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.os.Bundle
-import android.util.Log
+import android.os.Environment
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.example.smsgpstracker.model.GpsTrackPoint
-import com.example.smsgpstracker.repository.GpsTrackRepository
 import com.google.android.gms.maps.*
 import com.google.android.gms.maps.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
-
     private lateinit var googleMap: GoogleMap
-    private val trackPoints = mutableListOf<GpsTrackPoint>()
 
-    // ==========================================================
-    // LIFECYCLE
-    // ==========================================================
+    private val trackPoints = mutableListOf<LatLng>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,15 +39,19 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtLast = findViewById(R.id.txtLast)
 
         val mapFragment =
-            supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
+            supportFragmentManager.findFragmentById(R.id.map)
+                    as SupportMapFragment
+
         mapFragment.getMapAsync(this)
 
-        registerReceiver(
+        ContextCompat.registerReceiver(
+            this,
             smsReceiver,
-            IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
+            android.content.IntentFilter(
+                SmsCommandProcessor.ACTION_SMS_EVENT
+            ),
+            ContextCompat.RECEIVER_NOT_EXPORTED
         )
-
-        loadFromDb()
     }
 
     override fun onDestroy() {
@@ -57,156 +61,134 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
-        redrawTrack()
     }
 
-    // ==========================================================
-    // 📡 BROADCAST RECEIVER
-    // ==========================================================
+    // ================= BROADCAST =================
 
-    private val smsReceiver = object : BroadcastReceiver() {
+    private val smsReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+
         override fun onReceive(context: Context?, intent: Intent?) {
 
-            val msg = intent?.getStringExtra("SMS_BODY")
-                ?.replace("\n", "")
-                ?.trim()
-                ?: return
+            if (intent == null) return
 
-            Log.d("RX_UI", "Broadcast ricevuto: $msg")
+            val msg = intent.getStringExtra("SMS_BODY") ?: return
 
             when {
 
                 msg.equals("CTRL:START", true) -> {
-                    Log.d("RX_UI", "CTRL START ricevuto")
-                    resetAll()
+                    resetMapOnly()
                 }
 
-                msg.equals("CTRL:END", true) -> {
-                    Log.d("RX_UI", "CTRL END ricevuto")
-                    resetAll()
-                    Toast.makeText(
-                        this@RxActivity,
-                        "Ciclo terminato (END)",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                msg.equals("CTRL:END", true) ||
+                        msg.equals("CTRL:STOP", true) -> {
+                    saveSnapshotThenReset()
                 }
 
-                msg.equals("CTRL:STOP", true) -> {
-                    Log.d("RX_UI", "CTRL STOP ricevuto")
-                    resetAll()
-                    Toast.makeText(
-                        this@RxActivity,
-                        "Ciclo terminato (STOP)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
+                msg == "GPS" -> {
 
-                msg.startsWith("GPS:", true) -> {
-                    Log.d("RX_UI", "GPS ricevuto → aggiorno mappa")
-                    loadFromDb()
+                    val lat = intent.getDoubleExtra("lat", 0.0)
+                    val lon = intent.getDoubleExtra("lon", 0.0)
+
+                    val point = LatLng(lat, lon)
+                    trackPoints.add(point)
+
+                    updateMapRealtime(point)
                 }
             }
         }
     }
 
-    // ==========================================================
-    // RESET COMPLETO CICLO
-    // ==========================================================
+    // ================= REALTIME =================
 
-    private fun resetAll() {
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            GpsTrackRepository.clear(this@RxActivity)
-
-            launch(Dispatchers.Main) {
-                trackPoints.clear()
-
-                if (::googleMap.isInitialized) {
-                    googleMap.clear()
-                }
-
-                updateText()
-
-                Log.d("RX_UI", "Reset completo eseguito")
-            }
-        }
-    }
-
-    // ==========================================================
-    // CARICAMENTO DATABASE
-    // ==========================================================
-
-    private fun loadFromDb() {
-
-        lifecycleScope.launch(Dispatchers.IO) {
-
-            val points =
-                GpsTrackRepository.getAll(this@RxActivity)
-
-            launch(Dispatchers.Main) {
-
-                trackPoints.clear()
-                trackPoints.addAll(points)
-
-                redrawTrack()
-                updateText()
-
-                Log.d("RX_UI", "Mappa aggiornata. Punti: ${trackPoints.size}")
-            }
-        }
-    }
-
-    // ==========================================================
-    // DISEGNO MAPPA
-    // ==========================================================
-
-    private fun redrawTrack() {
+    private fun updateMapRealtime(point: LatLng) {
 
         if (!::googleMap.isInitialized) return
 
-        googleMap.clear()
-
-        if (trackPoints.isEmpty()) return
-
-        val latLngs = trackPoints.map {
-            LatLng(it.latitude, it.longitude)
-        }
+        googleMap.addMarker(
+            MarkerOptions().position(point)
+        )
 
         googleMap.addPolyline(
             PolylineOptions()
-                .addAll(latLngs)
+                .addAll(trackPoints)
                 .width(6f)
         )
 
-        latLngs.forEach {
-            googleMap.addMarker(MarkerOptions().position(it))
-        }
-
-        googleMap.moveCamera(
-            CameraUpdateFactory.newLatLngZoom(
-                latLngs.last(),
-                16f
-            )
+        googleMap.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(point, 16f)
         )
+
+        txtCount.text = "Punti: ${trackPoints.size}"
+        txtLast.text = "Ultima:\n${point.latitude}, ${point.longitude}"
     }
 
-    // ==========================================================
-    // AGGIORNAMENTO UI
-    // ==========================================================
+    // ================= SNAPSHOT =================
 
-    private fun updateText() {
+    private fun saveSnapshotThenReset() {
 
-        txtStatus.text = "RX ATTIVO"
-        txtCount.text = "Punti ricevuti: ${trackPoints.size}"
+        if (!::googleMap.isInitialized) return
 
-        trackPoints.lastOrNull()?.let {
-            txtLast.text =
-                "Ultima posizione:\n${it.latitude}, ${it.longitude}"
-        } ?: run {
-            txtLast.text = "Ultima posizione: --"
+        googleMap.snapshot { bitmap ->
+
+            if (bitmap != null) {
+                saveBitmap(bitmap)
+                resetMapOnly()
+
+                Toast.makeText(
+                    this,
+                    "Ciclo terminato e salvato",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
+
+    private fun saveBitmap(bitmap: Bitmap) {
+
+        lifecycleScope.launch(Dispatchers.IO) {
+
+            val folder = getExternalFilesDir(
+                Environment.DIRECTORY_PICTURES
+            )
+
+            val time =
+                SimpleDateFormat(
+                    "yyyyMMdd_HHmmss",
+                    Locale.getDefault()
+                ).format(Date())
+
+            val file = File(
+                folder,
+                "TRACK_$time.jpg"
+            )
+
+            FileOutputStream(file).use {
+                bitmap.compress(
+                    Bitmap.CompressFormat.JPEG,
+                    95,
+                    it
+                )
+            }
+        }
+    }
+
+    // ================= RESET =================
+
+    private fun resetMapOnly() {
+
+        trackPoints.clear()
+
+        if (::googleMap.isInitialized)
+            googleMap.clear()
+
+        txtCount.text = "Punti: 0"
+        txtLast.text = "Ultima: --"
+    }
+
 }
+
+
+
 
 
 

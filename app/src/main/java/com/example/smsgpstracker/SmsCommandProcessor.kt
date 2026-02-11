@@ -4,9 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.example.smsgpstracker.repository.GpsTrackRepository
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 
 object SmsCommandProcessor {
 
@@ -17,60 +15,75 @@ object SmsCommandProcessor {
 
         val text = body.trim()
 
-        Log.d("RX_SMS", "SMS ricevuto: $text")
+        Log.d("RX_PROCESS", "SMS ricevuto: $text")
 
-        // =====================================================
-        // 📌 CTRL COMMANDS
-        // =====================================================
-
-        if (text.equals("CTRL:START", true) ||
+        // =========================
+        // COMANDI DI CONTROLLO
+        // =========================
+        if (
+            text.equals("CTRL:START", true) ||
             text.equals("CTRL:END", true) ||
             text.equals("CTRL:STOP", true)
         ) {
 
-            val intent = Intent(ACTION_SMS_EVENT)
-            intent.putExtra("SMS_BODY", text.uppercase())
-            context.sendBroadcast(intent)
-
-            Log.d("RX_SMS", "CTRL broadcast inviato: $text")
+            sendInternalBroadcast(context, text)
             return
         }
 
-        // =====================================================
-        // 📌 GPS MESSAGE
-        // =====================================================
-
+        // =========================
+        // PARSING GPS
+        // =========================
         val regex =
             Regex("""GPS[:\s]+(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)""")
 
         val match = regex.find(text.uppercase())
 
-        if (match == null) {
-            Log.d("RX_SMS", "Formato non riconosciuto")
-            return
+        if (match != null) {
+
+            val lat = match.groupValues[1].toDouble()
+            val lon = match.groupValues[3].toDouble()
+
+            CoroutineScope(Dispatchers.IO).launch {
+
+                GpsTrackRepository.addPoint(
+                    context,
+                    lat,
+                    lon
+                )
+
+                sendInternalBroadcast(
+                    context,
+                    "GPS",
+                    lat,
+                    lon
+                )
+            }
+        }
+    }
+
+    // ======================================================
+    // BROADCAST ESPLICITO (FIX ANDROID 13-15)
+    // ======================================================
+    private fun sendInternalBroadcast(
+        context: Context,
+        type: String,
+        lat: Double? = null,
+        lon: Double? = null
+    ) {
+
+        val intent = Intent(ACTION_SMS_EVENT).apply {
+            setPackage(context.packageName)   // <<< FONDAMENTALE
+            putExtra("SMS_BODY", type)
+
+            if (lat != null && lon != null) {
+                putExtra("lat", lat)
+                putExtra("lon", lon)
+            }
+
+            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         }
 
-        val lat = match.groupValues[1].toDouble()
-        val lon = match.groupValues[3].toDouble()
-
-        Log.d("RX_SMS", "GPS valido: $lat , $lon")
-
-        CoroutineScope(Dispatchers.IO).launch {
-
-            // 💾 Salva nel DB
-            GpsTrackRepository.addPoint(
-                context = context,
-                lat = lat,
-                lon = lon
-            )
-
-            // 📢 Notifica UI
-            val intent = Intent(ACTION_SMS_EVENT)
-            intent.putExtra("SMS_BODY", "GPS:$lat,$lon")
-            context.sendBroadcast(intent)
-
-            Log.d("RX_SMS", "Broadcast GPS inviato")
-        }
+        context.sendBroadcast(intent)
     }
 }
 

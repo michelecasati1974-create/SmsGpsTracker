@@ -1,34 +1,40 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical"
-    android:padding="16dp"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    	android:orientation="vertical"
+    	android:padding="16dp"
+    	android:layout_width="match_parent"
+    	android:layout_height="match_parent">
 
     <!-- Numero telefono RX -->
     <EditText
-        android:id="@+id/edtPhoneRx"
-        android:hint="Numero telefono RX"
-        android:inputType="phone"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"/>
+   	 android:id="@+id/edtPhoneRx"
+   	 android:hint="Numero telefono RX"
+   	 android:inputType="phone"
+    	android:minHeight="48dp"
+    	android:padding="12dp"
+    	android:layout_width="match_parent"
+    	android:layout_height="wrap_content"/>
 
     <!-- Numero massimo SMS -->
     <EditText
-        android:id="@+id/edtMaxSms"
-        android:hint="Numero massimo SMS"
-        android:inputType="number"
-        android:layout_marginTop="8dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"/>
+   	 android:id="@+id/edtMaxSms"
+   	 android:hint="Numero massimo SMS"
+    	android:inputType="number"
+    	android:minHeight="48dp"
+    	android:padding="12dp"
+    	android:layout_marginTop="8dp"
+    	android:layout_width="match_parent"
+    	android:layout_height="wrap_content"/>
 
     <!-- Intervallo in minuti -->
     <EditText
-        android:id="@+id/edtInterval"
-        android:hint="Intervallo (minuti)"
-        android:inputType="number"
-        android:layout_marginTop="8dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"/>
+    	android:id="@+id/edtInterval"
+    	android:hint="Intervallo (minuti)"
+    	android:inputType="number"
+    	android:minHeight="48dp"
+    	android:padding="12dp"
+    	android:layout_marginTop="8dp"
+    	android:layout_width="match_parent"
+    	android:layout_height="wrap_content"/>
 
     <!-- LED GPS + descrizione -->
     <LinearLayout

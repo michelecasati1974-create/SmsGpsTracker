@@ -26,8 +26,6 @@ class TxActivity : AppCompatActivity() {
     private lateinit var btnStartTx: Button
     private lateinit var btnStopTx: Button
 
-
-
     // Preferences
     private lateinit var prefs: SharedPreferences
 
@@ -147,13 +145,36 @@ class TxActivity : AppCompatActivity() {
     // =========================
 
     private fun setupLocationCallback() {
+
         locationCallback = object : LocationCallback() {
+
             override fun onLocationResult(result: LocationResult) {
+
                 if (!isRunning) return
-                result.locations.forEach { handleLocation(it) }
+
+                val location = result.lastLocation
+
+                if (location != null) {
+
+                    // GPS FIX OK → LED VERDE
+                    runOnUiThread {
+                        imgLedGps.setImageResource(R.drawable.led_green)
+                    }
+
+                    handleLocation(location)
+
+                } else {
+
+                    // GPS in ricerca → LED GIALLO
+                    runOnUiThread {
+                        imgLedGps.setImageResource(R.drawable.led_yellow)
+                    }
+                    imgLedGps.setImageResource(R.drawable.led_red)
+                }
             }
         }
     }
+
 
     private fun startGps() {
         if (ActivityCompat.checkSelfPermission(this,
