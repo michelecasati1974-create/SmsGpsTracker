@@ -1,6 +1,8 @@
 package com.example.smsgpstracker
 
 import android.Manifest
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Bundle
@@ -24,11 +26,15 @@ class TxActivity : AppCompatActivity() {
     private lateinit var btnStartTx: Button
     private lateinit var btnStopTx: Button
 
+
+
+    // Preferences
+    private lateinit var prefs: SharedPreferences
+
     // GPS
     private lateinit var fusedClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
 
-    // Logica TX
     private val handler = Handler(Looper.getMainLooper())
     private var isRunning = false
 
@@ -36,10 +42,6 @@ class TxActivity : AppCompatActivity() {
     private var smsSent = 0
     private var intervalMs = 0L
     private var windowStart = 0L
-    private var lastValidLocation: Location? = null
-
-    private val ACCURACY_GOOD = 30f
-    private val ACCURACY_MEDIUM = 80f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,50 +56,82 @@ class TxActivity : AppCompatActivity() {
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
 
+        prefs = getSharedPreferences("TX_PREFS", Context.MODE_PRIVATE)
+
+        loadSavedParameters()
+
         fusedClient = LocationServices.getFusedLocationProviderClient(this)
+        setupLocationCallback()
 
         btnStartTx.setOnClickListener { startTx() }
         btnStopTx.setOnClickListener { stopTx() }
 
-        setupLocationCallback()
         resetUi()
     }
 
-    // ================= START / STOP =================
+    // =========================
+    // SALVATAGGIO PARAMETRI
+    // =========================
+
+    private fun loadSavedParameters() {
+        edtPhoneRx.setText(prefs.getString("phone", ""))
+        edtMaxSms.setText(prefs.getInt("maxSms", 0).takeIf { it > 0 }?.toString() ?: "")
+        edtInterval.setText(prefs.getLong("interval", 0L).takeIf { it > 0 }?.toString() ?: "")
+    }
+
+    private fun saveParameters(phone: String, maxSms: Int, intervalMin: Long) {
+        prefs.edit()
+            .putString("phone", phone)
+            .putInt("maxSms", maxSms)
+            .putLong("interval", intervalMin)
+            .apply()
+    }
+
+    // =========================
+    // START / STOP
+    // =========================
 
     private fun startTx() {
+
         if (isRunning) return
 
         val phone = edtPhoneRx.text.toString().trim()
         val nSms = edtMaxSms.text.toString().toIntOrNull()
         val intervalMin = edtInterval.text.toString().toLongOrNull()
 
-        if (phone.isEmpty() || nSms == null || intervalMin == null || nSms <= 0 || intervalMin <= 0) {
+        if (phone.isEmpty() || nSms == null || intervalMin == null ||
+            nSms <= 0 || intervalMin <= 0) {
             Toast.makeText(this, "Parametri non validi", Toast.LENGTH_SHORT).show()
             return
         }
+
+        saveParameters(phone, nSms, intervalMin)
 
         maxSms = nSms
         intervalMs = intervalMin * 60_000L
         smsSent = 0
         windowStart = System.currentTimeMillis()
-        lastValidLocation = null
         isRunning = true
 
         btnStartTx.isEnabled = false
         btnStopTx.isEnabled = true
 
         txtSmsCounter.text = "SMS: 0/$maxSms"
-        txtTimer.text = "00:00"
 
+        sendControlSms("CTRL:START")
         startGps()
         startTimer()
     }
 
     private fun stopTx() {
+        if (!isRunning) return
+
+        sendControlSms("CTRL:STOP")
+
         isRunning = false
         handler.removeCallbacksAndMessages(null)
         fusedClient.removeLocationUpdates(locationCallback)
+
         resetUi()
     }
 
@@ -106,23 +140,26 @@ class TxActivity : AppCompatActivity() {
         btnStopTx.isEnabled = false
         txtSmsCounter.text = "SMS: 0/0"
         txtTimer.text = "00:00"
-        imgLedGps.setImageResource(R.drawable.led_red)
     }
 
-    // ================= GPS =================
+    // =========================
+    // GPS
+    // =========================
 
     private fun setupLocationCallback() {
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 if (!isRunning) return
-                for (loc in result.locations) handleLocation(loc)
+                result.locations.forEach { handleLocation(it) }
             }
         }
     }
 
     private fun startGps() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED) {
+
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
@@ -140,43 +177,47 @@ class TxActivity : AppCompatActivity() {
     }
 
     private fun handleLocation(loc: Location) {
-        when {
-            loc.accuracy <= ACCURACY_GOOD ->
-                imgLedGps.setImageResource(R.drawable.led_green)
-            loc.accuracy <= ACCURACY_MEDIUM ->
-                imgLedGps.setImageResource(R.drawable.led_yellow)
-            else ->
-                imgLedGps.setImageResource(R.drawable.led_red)
-        }
 
-        if (loc.accuracy > ACCURACY_MEDIUM) return
-
-        lastValidLocation = loc
+        if (!isRunning) return
 
         val now = System.currentTimeMillis()
+
         if (now - windowStart >= intervalMs) {
-            sendSms(loc)
+
+            if (smsSent >= maxSms) {
+                sendControlSms("CTRL:END")
+                stopTx()
+                return
+            }
+
+            val msg = "GPS:${loc.latitude},${loc.longitude}"
+            SmsManager.getDefault().sendTextMessage(
+                edtPhoneRx.text.toString(),
+                null,
+                msg,
+                null,
+                null
+            )
+
+            smsSent++
+            txtSmsCounter.text = "SMS: $smsSent/$maxSms"
             windowStart = now
         }
     }
 
-    // ================= SMS =================
-
-    private fun sendSms(loc: Location) {
-        if (smsSent >= maxSms) {
-            stopTx()
-            return
-        }
-
-        val msg = "GPS:${loc.latitude},${loc.longitude}"
-        SmsManager.getDefault()
-            .sendTextMessage(edtPhoneRx.text.toString(), null, msg, null, null)
-
-        smsSent++
-        txtSmsCounter.text = "SMS: $smsSent/$maxSms"
+    private fun sendControlSms(msg: String) {
+        SmsManager.getDefault().sendTextMessage(
+            edtPhoneRx.text.toString(),
+            null,
+            msg,
+            null,
+            null
+        )
     }
 
-    // ================= TIMER =================
+    // =========================
+    // TIMER
+    // =========================
 
     private fun startTimer() {
         handler.post(object : Runnable {
@@ -194,7 +235,4 @@ class TxActivity : AppCompatActivity() {
         stopTx()
     }
 }
-
-
-
 

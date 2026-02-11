@@ -10,41 +10,66 @@ import kotlinx.coroutines.launch
 
 object SmsCommandProcessor {
 
-    const val ACTION_NEW_POSITION =
-        "com.example.smsgpstracker.NEW_POSITION"
+    const val ACTION_SMS_EVENT =
+        "com.example.smsgpstracker.SMS_EVENT"
 
     fun process(context: Context, sender: String, body: String) {
 
-        val text = body.trim().uppercase()
+        val text = body.trim()
+
+        Log.d("RX_SMS", "SMS ricevuto: $text")
+
+        // =====================================================
+        // 📌 CTRL COMMANDS
+        // =====================================================
+
+        if (text.equals("CTRL:START", true) ||
+            text.equals("CTRL:END", true) ||
+            text.equals("CTRL:STOP", true)
+        ) {
+
+            val intent = Intent(ACTION_SMS_EVENT)
+            intent.putExtra("SMS_BODY", text.uppercase())
+            context.sendBroadcast(intent)
+
+            Log.d("RX_SMS", "CTRL broadcast inviato: $text")
+            return
+        }
+
+        // =====================================================
+        // 📌 GPS MESSAGE
+        // =====================================================
 
         val regex =
             Regex("""GPS[:\s]+(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)""")
 
-        val match = regex.find(text)
+        val match = regex.find(text.uppercase())
+
         if (match == null) {
-            Log.d("RX_SMS", "Formato GPS non valido")
+            Log.d("RX_SMS", "Formato non riconosciuto")
             return
         }
 
         val lat = match.groupValues[1].toDouble()
         val lon = match.groupValues[3].toDouble()
 
-        Log.d("RX_SMS", "GPS ricevuto: $lat , $lon")
+        Log.d("RX_SMS", "GPS valido: $lat , $lon")
 
         CoroutineScope(Dispatchers.IO).launch {
 
-            // 💾 SALVATAGGIO DB
+            // 💾 Salva nel DB
             GpsTrackRepository.addPoint(
                 context = context,
                 lat = lat,
                 lon = lon
             )
 
-            // 📢 NOTIFICA UI
-            val intent = Intent(ACTION_NEW_POSITION)
-            intent.putExtra("lat", lat)
-            intent.putExtra("lon", lon)
+            // 📢 Notifica UI
+            val intent = Intent(ACTION_SMS_EVENT)
+            intent.putExtra("SMS_BODY", "GPS:$lat,$lon")
             context.sendBroadcast(intent)
+
+            Log.d("RX_SMS", "Broadcast GPS inviato")
         }
     }
 }
