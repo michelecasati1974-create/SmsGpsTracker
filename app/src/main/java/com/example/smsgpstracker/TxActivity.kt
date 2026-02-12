@@ -251,9 +251,17 @@ class TxActivity : AppCompatActivity() {
         })
     }
 
+
     override fun onDestroy() {
         super.onDestroy()
-        stopTx()
+
+        // RIMUOVIAMO stopTx()
+        // stopTx()
+
+        if (isRunning) {
+            fusedClient.removeLocationUpdates(locationCallback)
+            handler.removeCallbacksAndMessages(null)
+        }
     }
 }
 
