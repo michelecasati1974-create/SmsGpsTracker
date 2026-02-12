@@ -1,23 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.smsgpstracker"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ===== FEATURE ===== -->
-    <uses-feature
-        android:name="android.hardware.telephony"
-        android:required="false" />
+    <!-- ===== PERMESSI SMS ===== -->
+    <!-- Foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
 
-    <!-- ===== PERMESSI ===== -->
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
-    <uses-permission android:name="android.permission.READ_SMS" />
-    <uses-permission android:name="android.permission.SEND_SMS" />
+    <!-- Location -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- SMS -->
+    <uses-permission android:name="android.permission.SEND_SMS"/>
 
     <!-- Android 13+ -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
+    <!-- Hardware telephony -->
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false"/>
 
     <application
         android:allowBackup="true"
@@ -35,16 +43,20 @@
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyBZioq1zDU58T4hb1vPrHkwjG5p1q5PyL8" />
 
+        <!-- ===== FOREGROUND SERVICE TX ===== -->
+        <service
+            android:name=".TxForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
         <!-- ===== MAIN ===== -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
         </activity>
 
         <!-- ===== TX ===== -->
@@ -62,14 +74,11 @@
             android:name=".SmsReceiver"
             android:permission="android.permission.BROADCAST_SMS"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
-
         </receiver>
 
     </application>
 
 </manifest>
-

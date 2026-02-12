@@ -1,0 +1,204 @@
+package com.example.smsgpstracker;
+
+import android.Manifest;
+import android.app.*;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.telephony.SmsManager;
+
+import androidx.annotation.Nullable;
+import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+
+import com.google.android.gms.location.*;
+import android.os.Looper;
+
+public class TxForegroundService extends Service {
+
+    public static final String ACTION_START = "ACTION_START";
+    public static final String ACTION_STOP = "ACTION_STOP";
+    public static final String ACTION_UPDATE = "com.example.smsgpstracker.ACTION_UPDATE";
+
+    private static final String CHANNEL_ID = "TxServiceChannel";
+
+    private FusedLocationProviderClient fusedClient;
+    private LocationCallback locationCallback;
+
+    private boolean isRunning = false;
+    private int smsSent = 0;
+    private int maxSms = 0;
+    private int intervalMinutes = 1;
+    private String phoneNumber = "";
+
+    private Handler handler = new Handler(Looper.getMainLooper());
+    private int secondsRemaining = 0;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        fusedClient = LocationServices.getFusedLocationProviderClient(this);
+        createNotificationChannel();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+
+        if (intent != null) {
+
+            String action = intent.getAction();
+
+            if (ACTION_START.equals(action)) {
+                phoneNumber = intent.getStringExtra("phone");
+                maxSms = intent.getIntExtra("maxSms", 10);
+                intervalMinutes = intent.getIntExtra("interval", 1);
+                startTracking();
+            }
+
+            if (ACTION_STOP.equals(action)) {
+                stopTracking();
+            }
+        }
+
+        return START_STICKY;
+    }
+
+    private void startTracking() {
+
+        if (isRunning) return;
+
+        isRunning = true;
+        smsSent = 0;
+
+        startForeground(1, buildNotification());
+
+        startTimer();
+        sendUpdate(false);
+    }
+
+    private void startTimer() {
+
+        secondsRemaining = intervalMinutes * 60;
+
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+
+                if (!isRunning) return;
+
+                secondsRemaining--;
+
+                if (secondsRemaining <= 0) {
+                    requestLocation();
+                    secondsRemaining = intervalMinutes * 60;
+                }
+
+                sendUpdate(false);
+                handler.postDelayed(this, 1000);
+            }
+        }, 1000);
+    }
+
+    private void requestLocation() {
+
+        if (smsSent >= maxSms) {
+            stopTracking();
+            return;
+        }
+
+        if (ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+
+        fusedClient.getLastLocation().addOnSuccessListener(location -> {
+            if (location != null) {
+                sendSms(location);
+            }
+        });
+    }
+
+    private void sendSms(Location location) {
+
+        String message = "GPS:"
+                + location.getLatitude()
+                + ","
+                + location.getLongitude();
+
+        SmsManager.getDefault().sendTextMessage(
+                phoneNumber,
+                null,
+                message,
+                null,
+                null
+        );
+
+        smsSent++;
+        sendUpdate(true);
+    }
+
+    private void stopTracking() {
+
+        if (!isRunning) return;
+
+        isRunning = false;
+        handler.removeCallbacksAndMessages(null);
+
+        stopForeground(true);
+        stopSelf();
+
+        sendUpdate(false);
+    }
+
+    private void sendUpdate(boolean gpsFix) {
+
+        Intent intent = new Intent(ACTION_UPDATE);
+        intent.setPackage(getPackageName());
+
+        intent.putExtra("isRunning", isRunning);
+        intent.putExtra("smsSent", smsSent);
+        intent.putExtra("maxSms", maxSms);
+        intent.putExtra("secondsRemaining", secondsRemaining);
+        intent.putExtra("gpsFix", gpsFix);
+
+        sendBroadcast(intent);
+    }
+
+    private Notification buildNotification() {
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("SmsGpsTracker attivo")
+                .setContentText("Invio GPS in corso")
+                .setSmallIcon(R.drawable.led_green)
+                .setOngoing(true)
+                .build();
+    }
+
+    private void createNotificationChannel() {
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Tx Service Channel",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+
+            NotificationManager manager =
+                    getSystemService(NotificationManager.class);
+
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+}
