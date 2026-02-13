@@ -1,12 +1,13 @@
 package com.example.smsgpstracker
 
+import android.annotation.SuppressLint
+import android.content.*
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Environment
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.maps.*
 import com.google.android.gms.maps.model.*
@@ -16,10 +17,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -30,6 +27,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private val trackPoints = mutableListOf<LatLng>()
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx)
@@ -44,14 +42,17 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mapFragment.getMapAsync(this)
 
-        ContextCompat.registerReceiver(
-            this,
-            smsReceiver,
-            android.content.IntentFilter(
-                SmsCommandProcessor.ACTION_SMS_EVENT
-            ),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
+
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                smsReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            registerReceiver(smsReceiver, filter)
+        }
     }
 
     override fun onDestroy() {
@@ -65,26 +66,31 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     // ================= BROADCAST =================
 
-    private val smsReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+    private val smsReceiver = object : BroadcastReceiver() {
 
         override fun onReceive(context: Context?, intent: Intent?) {
 
-            if (intent == null) return
-
+            intent ?: return
             val msg = intent.getStringExtra("SMS_BODY") ?: return
 
-            when {
+            when (msg) {
 
-                msg.equals("CTRL:START", true) -> {
+                "CTRL:START" -> {
+                    txtStatus.text = "Tracking avviato"
                     resetMapOnly()
                 }
 
-                msg.equals("CTRL:END", true) ||
-                        msg.equals("CTRL:STOP", true) -> {
+                "CTRL:STOP" -> {
+                    txtStatus.text = "Tracking fermato"
                     saveSnapshotThenReset()
                 }
 
-                msg == "GPS" -> {
+                "CTRL:END" -> {
+                    txtStatus.text = "Tracking completato"
+                    saveSnapshotThenReset()
+                }
+
+                "GPS" -> {
 
                     val lat = intent.getDoubleExtra("lat", 0.0)
                     val lon = intent.getDoubleExtra("lon", 0.0)
@@ -104,14 +110,16 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         if (!::googleMap.isInitialized) return
 
-        googleMap.addMarker(
-            MarkerOptions().position(point)
-        )
+        googleMap.clear()
 
         googleMap.addPolyline(
             PolylineOptions()
                 .addAll(trackPoints)
                 .width(6f)
+        )
+
+        googleMap.addMarker(
+            MarkerOptions().position(point)
         )
 
         googleMap.animateCamera(
@@ -131,14 +139,16 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         googleMap.snapshot { bitmap ->
 
             if (bitmap != null) {
+
                 saveBitmap(bitmap)
-                resetMapOnly()
 
                 Toast.makeText(
                     this,
-                    "Ciclo terminato e salvato",
+                    "Snapshot salvato",
                     Toast.LENGTH_LONG
                 ).show()
+
+                resetMapOnly()
             }
         }
     }
@@ -147,9 +157,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         lifecycleScope.launch(Dispatchers.IO) {
 
-            val folder = getExternalFilesDir(
-                Environment.DIRECTORY_PICTURES
-            )
+            val folder =
+                getExternalFilesDir(Environment.DIRECTORY_PICTURES)
 
             val time =
                 SimpleDateFormat(
@@ -157,10 +166,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     Locale.getDefault()
                 ).format(Date())
 
-            val file = File(
-                folder,
-                "TRACK_$time.jpg"
-            )
+            val file =
+                File(folder, "TRACK_$time.jpg")
 
             FileOutputStream(file).use {
                 bitmap.compress(
@@ -184,7 +191,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtCount.text = "Punti: 0"
         txtLast.text = "Ultima: --"
     }
-
 }
 
 

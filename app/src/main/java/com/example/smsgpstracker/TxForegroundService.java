@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat;
 import com.google.android.gms.location.*;
 import android.os.Looper;
 
+
 public class TxForegroundService extends Service {
 
     public static final String ACTION_START = "ACTION_START";
@@ -75,6 +76,8 @@ public class TxForegroundService extends Service {
 
         startForeground(1, buildNotification());
 
+        sendControlSms("CTRL:START");   // 🔴 AGGIUNGI QUESTA RIGA
+
         startTimer();
         sendUpdate(false);
     }
@@ -105,6 +108,7 @@ public class TxForegroundService extends Service {
     private void requestLocation() {
 
         if (smsSent >= maxSms) {
+            sendControlSms("CTRL:END");   // 🔴 AGGIUNGI
             stopTracking();
             return;
         }
@@ -144,6 +148,8 @@ public class TxForegroundService extends Service {
     private void stopTracking() {
 
         if (!isRunning) return;
+
+        sendControlSms("CTRL:STOP");   // 🔴 AGGIUNGI
 
         isRunning = false;
         handler.removeCallbacksAndMessages(null);
@@ -193,6 +199,26 @@ public class TxForegroundService extends Service {
 
             manager.createNotificationChannel(channel);
         }
+    }
+    private void sendControlSms(String text) {
+
+        if (phoneNumber == null || phoneNumber.isEmpty()) return;
+
+        SmsManager smsManager;
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            smsManager = getSystemService(SmsManager.class);
+        } else {
+            smsManager = SmsManager.getDefault();
+        }
+
+        smsManager.sendTextMessage(
+                phoneNumber,
+                null,
+                text,
+                null,
+                null
+        );
     }
 
     @Nullable
