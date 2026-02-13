@@ -25,7 +25,12 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var txtLast: TextView
     private lateinit var googleMap: GoogleMap
 
+    private var mapReady = false
     private val trackPoints = mutableListOf<LatLng>()
+
+    // =====================================================
+    // ON CREATE
+    // =====================================================
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,7 +47,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mapFragment.getMapAsync(this)
 
-        val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
+        val filter =
+            IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
 
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(
@@ -60,11 +66,23 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         unregisterReceiver(smsReceiver)
     }
 
+    // =====================================================
+    // MAP READY
+    // =====================================================
+
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
+        mapReady = true
+
+        // Se ci sono punti accumulati prima che la mappa fosse pronta
+        if (trackPoints.isNotEmpty()) {
+            drawAllPoints()
+        }
     }
 
-    // ================= BROADCAST =================
+    // =====================================================
+    // BROADCAST RECEIVER
+    // =====================================================
 
     private val smsReceiver = object : BroadcastReceiver() {
 
@@ -92,23 +110,30 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 "GPS" -> {
 
-                    val lat = intent.getDoubleExtra("lat", 0.0)
-                    val lon = intent.getDoubleExtra("lon", 0.0)
+                    val lat =
+                        intent.getDoubleExtra("lat", 0.0)
+                    val lon =
+                        intent.getDoubleExtra("lon", 0.0)
 
                     val point = LatLng(lat, lon)
+
                     trackPoints.add(point)
 
-                    updateMapRealtime(point)
+                    if (mapReady) {
+                        drawAllPoints()
+                    }
                 }
             }
         }
     }
 
-    // ================= REALTIME =================
+    // =====================================================
+    // DRAW MAP
+    // =====================================================
 
-    private fun updateMapRealtime(point: LatLng) {
+    private fun drawAllPoints() {
 
-        if (!::googleMap.isInitialized) return
+        if (!mapReady) return
 
         googleMap.clear()
 
@@ -118,23 +143,30 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 .width(6f)
         )
 
+        val last = trackPoints.last()
+
         googleMap.addMarker(
-            MarkerOptions().position(point)
+            MarkerOptions().position(last)
         )
 
         googleMap.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(point, 16f)
+            CameraUpdateFactory.newLatLngZoom(last, 16f)
         )
 
-        txtCount.text = "Punti: ${trackPoints.size}"
-        txtLast.text = "Ultima:\n${point.latitude}, ${point.longitude}"
+        txtCount.text =
+            "Punti: ${trackPoints.size}"
+
+        txtLast.text =
+            "Ultima:\n${last.latitude}, ${last.longitude}"
     }
 
-    // ================= SNAPSHOT =================
+    // =====================================================
+    // SNAPSHOT
+    // =====================================================
 
     private fun saveSnapshotThenReset() {
 
-        if (!::googleMap.isInitialized) return
+        if (!mapReady) return
 
         googleMap.snapshot { bitmap ->
 
@@ -158,7 +190,9 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         lifecycleScope.launch(Dispatchers.IO) {
 
             val folder =
-                getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                getExternalFilesDir(
+                    Environment.DIRECTORY_PICTURES
+                )
 
             val time =
                 SimpleDateFormat(
@@ -173,25 +207,27 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 bitmap.compress(
                     Bitmap.CompressFormat.JPEG,
                     95,
-                    it
-                )
+                    it)
             }
         }
     }
 
-    // ================= RESET =================
+    // =====================================================
+    // RESET
+    // =====================================================
 
     private fun resetMapOnly() {
 
         trackPoints.clear()
 
-        if (::googleMap.isInitialized)
+        if (mapReady)
             googleMap.clear()
 
         txtCount.text = "Punti: 0"
         txtLast.text = "Ultima: --"
     }
 }
+
 
 
 

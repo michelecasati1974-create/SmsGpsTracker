@@ -82,7 +82,7 @@ object SmsCommandProcessor {
 
             addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         }
-
+        Log.d("RX_FLOW", "Broadcast interno inviato: $type")
         context.sendBroadcast(intent)
     }
 }
