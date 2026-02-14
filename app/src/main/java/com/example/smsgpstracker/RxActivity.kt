@@ -2,25 +2,22 @@ package com.example.smsgpstracker
 
 import android.annotation.SuppressLint
 import android.content.*
-import android.graphics.Bitmap
+import android.graphics.*
+import android.location.Geocoder
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.maps.*
 import com.google.android.gms.maps.model.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import com.google.android.gms.maps.model.LatLngBounds
-import com.google.android.gms.maps.CameraUpdateFactory
-import kotlinx.coroutines.delay
-import androidx.lifecycle.lifecycleScope
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -30,6 +27,9 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var googleMap: GoogleMap
 
     private var mapReady = false
+    private var receiverRegistered = false
+    private var snapshotInProgress = false
+
     private val trackPoints = mutableListOf<LatLng>()
 
     // =====================================================
@@ -51,10 +51,9 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mapFragment.getMapAsync(this)
 
-        val filter =
-            IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
+        val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
 
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
+        if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(
                 smsReceiver,
                 filter,
@@ -63,11 +62,15 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         } else {
             registerReceiver(smsReceiver, filter)
         }
+
+        receiverRegistered = true
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(smsReceiver)
+        if (receiverRegistered) {
+            unregisterReceiver(smsReceiver)
+        }
     }
 
     // =====================================================
@@ -78,7 +81,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         googleMap = map
         mapReady = true
 
-        // Se ci sono punti accumulati prima che la mappa fosse pronta
         if (trackPoints.isNotEmpty()) {
             drawAllPoints()
         }
@@ -102,11 +104,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     resetMapOnly()
                 }
 
-                "CTRL:STOP" -> {
-                    txtStatus.text = "Tracking fermato"
-                    completeTracking()
-                }
-
+                "CTRL:STOP",
                 "CTRL:END" -> {
                     txtStatus.text = "Tracking completato"
                     completeTracking()
@@ -131,35 +129,45 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
+    // =====================================================
+    // COMPLETE TRACKING
+    // =====================================================
+
     private fun completeTracking() {
 
         if (!mapReady || trackPoints.isEmpty()) return
+        if (snapshotInProgress) return
+
+        snapshotInProgress = true
 
         lifecycleScope.launch {
 
-            delay(600)
+            delay(500)
 
             try {
 
-                val bounds = LatLngBounds.Builder().apply {
-                    trackPoints.forEach { include(it) }
-                }.build()
+                if (trackPoints.size > 1) {
 
-                googleMap.animateCamera(
-                    CameraUpdateFactory.newLatLngBounds(bounds, 150)
-                )
+                    val bounds = LatLngBounds.Builder().apply {
+                        trackPoints.forEach { include(it) }
+                    }.build()
 
-            } catch (e: Exception) {
-
-                googleMap.animateCamera(
-                    CameraUpdateFactory.newLatLngZoom(
-                        trackPoints.last(),
-                        16f
+                    googleMap.animateCamera(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 150)
                     )
-                )
-            }
+                } else {
 
-            delay(800)
+                    googleMap.animateCamera(
+                        CameraUpdateFactory.newLatLngZoom(
+                            trackPoints.last(),
+                            16f
+                        )
+                    )
+                }
+
+            } catch (_: Exception) {}
+
+            delay(700)
 
             saveSnapshotThenReset()
         }
@@ -171,7 +179,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun drawAllPoints() {
 
-        if (!mapReady) return
+        if (!mapReady || trackPoints.isEmpty()) return
 
         googleMap.clear()
 
@@ -179,21 +187,18 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             PolylineOptions()
                 .addAll(trackPoints)
                 .width(6f)
+                .color(Color.BLACK)
         )
 
         val last = trackPoints.last()
 
         googleMap.addMarker(
-            MarkerOptions().position(last)
+            MarkerOptions()
+                .position(last)
+                .title("Ultima posizione")
         )
 
-        googleMap.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(last, 16f)
-        )
-
-        txtCount.text =
-            "Punti: ${trackPoints.size}"
-
+        txtCount.text = "Punti: ${trackPoints.size}"
         txtLast.text =
             "Ultima:\n${last.latitude}, ${last.longitude}"
     }
@@ -204,34 +209,181 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun saveSnapshotThenReset() {
 
-        if (!mapReady || trackPoints.isEmpty()) return
+        if (trackPoints.isEmpty()) {
+            snapshotInProgress = false
+            return
+        }
 
-        val last = trackPoints.last()
+        // Assicurati che polilinee e marker siano già disegnati
+        drawAllPoints()
 
-        lifecycleScope.launch {
+        googleMap.setOnMapLoadedCallback {
 
-            val address =
-                getAddressText(
-                    last.latitude,
-                    last.longitude
-                )
+            googleMap.snapshot { mapBitmap ->
 
-            googleMap.snapshot { bitmap ->
+                if (mapBitmap == null) {
+                    snapshotInProgress = false
+                    return@snapshot
+                }
 
-                if (bitmap != null) {
+                lifecycleScope.launch(Dispatchers.IO) {
 
-                    saveBitmapWithText(
-                        bitmap,
-                        address
+                    val bitmap = mapBitmap.copy(
+                        Bitmap.Config.ARGB_8888,
+                        true
                     )
 
-                    Toast.makeText(
-                        this@RxActivity,
-                        "Snapshot salvato",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    val canvas = Canvas(bitmap)
 
-                    resetMapOnly()
+                    val paintText = Paint().apply {
+                        color = Color.BLACK
+                        textSize = 40f
+                        isAntiAlias = true
+                        typeface = Typeface.DEFAULT_BOLD
+                    }
+
+                    val last = trackPoints.last()
+
+                    val address =
+                        getAddressText(last.latitude, last.longitude)
+
+                    canvas.drawText(address, 60f, 70f, paintText)
+
+                    paintText.textSize = 34f
+                    paintText.typeface = Typeface.DEFAULT
+
+                    canvas.drawText(
+                        "Lat: ${last.latitude}",
+                        60f,
+                        120f,
+                        paintText
+                    )
+
+                    canvas.drawText(
+                        "Lon: ${last.longitude}",
+                        60f,
+                        160f,
+                        paintText
+                    )
+
+                    val time =
+                        SimpleDateFormat(
+                            "yyyyMMdd_HHmmss",
+                            Locale.getDefault()
+                        ).format(Date())
+
+                    val values = ContentValues().apply {
+                        put(
+                            MediaStore.Images.Media.DISPLAY_NAME,
+                            "TRACK_$time.jpg"
+                        )
+                        put(
+                            MediaStore.Images.Media.MIME_TYPE,
+                            "image/jpeg"
+                        )
+                        put(
+                            MediaStore.Images.Media.RELATIVE_PATH,
+                            Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
+                        )
+                    }
+
+                    val uri = contentResolver.insert(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        values
+                    )
+
+                    uri?.let {
+                        contentResolver.openOutputStream(it)?.use { out ->
+                            bitmap.compress(
+                                Bitmap.CompressFormat.JPEG,
+                                95,
+                                out
+                            )
+                        }
+                    }
+
+                    launch(Dispatchers.Main) {
+                        resetMapOnly()
+                        snapshotInProgress = false
+                    }
+                }
+            }
+        }
+    }
+
+
+    private fun saveBitmapWithText(
+        bitmap: Bitmap,
+        address: String
+    ) {
+
+        lifecycleScope.launch(Dispatchers.IO) {
+
+            val mutable =
+                bitmap.copy(Bitmap.Config.ARGB_8888, true)
+
+            val canvas = Canvas(mutable)
+
+            val paint = Paint().apply {
+                color = Color.BLACK
+                textSize = 40f
+                isAntiAlias = true
+                typeface = Typeface.DEFAULT_BOLD
+            }
+
+            val last = trackPoints.last()
+
+            canvas.drawText(
+                address,
+                40f,
+                70f,
+                paint
+            )
+
+            paint.textSize = 34f
+            paint.typeface = Typeface.DEFAULT
+
+            canvas.drawText(
+                "Lat: ${last.latitude}",
+                40f,
+                115f,
+                paint
+            )
+
+            canvas.drawText(
+                "Lon: ${last.longitude}",
+                40f,
+                155f,
+                paint
+            )
+
+            val time =
+                SimpleDateFormat(
+                    "yyyyMMdd_HHmmss",
+                    Locale.getDefault()
+                ).format(Date())
+
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "TRACK_$time.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(
+                    MediaStore.Images.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
+                )
+            }
+
+            val uri = contentResolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                values
+            )
+
+            uri?.let {
+                contentResolver.openOutputStream(it)?.use { out ->
+                    mutable.compress(
+                        Bitmap.CompressFormat.JPEG,
+                        95,
+                        out
+                    )
                 }
             }
         }
@@ -245,10 +397,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         return try {
 
             val geocoder =
-                android.location.Geocoder(
-                    this,
-                    Locale.getDefault()
-                )
+                Geocoder(this, Locale.getDefault())
 
             val list =
                 geocoder.getFromLocation(lat, lon, 1)
@@ -262,59 +411,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 "$comune ($provincia)"
             } else "Località sconosciuta"
 
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             "Località sconosciuta"
-        }
-    }
-
-    private fun saveBitmapWithText(
-        bitmap: Bitmap,
-        address: String
-    ) {
-
-        lifecycleScope.launch(Dispatchers.IO) {
-
-            val mutable =
-                bitmap.copy(Bitmap.Config.ARGB_8888, true)
-
-            val canvas =
-                android.graphics.Canvas(mutable)
-
-            val paint =
-                android.graphics.Paint().apply {
-                    color = android.graphics.Color.RED
-                    textSize = 60f
-                    isAntiAlias = true
-                }
-
-            canvas.drawText(
-                address,
-                50f,
-                80f,
-                paint
-            )
-
-            val folder =
-                getExternalFilesDir(
-                    Environment.DIRECTORY_PICTURES
-                )
-
-            val time =
-                SimpleDateFormat(
-                    "yyyyMMdd_HHmmss",
-                    Locale.getDefault()
-                ).format(Date())
-
-            val file =
-                File(folder, "TRACK_$time.jpg")
-
-            FileOutputStream(file).use {
-                mutable.compress(
-                    Bitmap.CompressFormat.JPEG,
-                    95,
-                    it
-                )
-            }
         }
     }
 
@@ -333,10 +431,3 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtLast.text = "Ultima: --"
     }
 }
-
-
-
-
-
-
-

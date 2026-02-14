@@ -1,51 +1,56 @@
 package com.example.smsgpstracker
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.widget.Button
-import android.widget.EditText
-import android.widget.ImageView
-import android.widget.TextView
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import android.annotation.SuppressLint
 
 class TxActivity : AppCompatActivity() {
 
-    private var edtPhoneRx: EditText? = null
-    private var edtMaxSms: EditText? = null
-    private var edtInterval: EditText? = null
-    private var imgLedGps: ImageView? = null
-    private var txtTimer: TextView? = null
-    private var txtSmsCounter: TextView? = null
-    private var btnStartTx: Button? = null
-    private var btnStopTx: Button? = null
+    private lateinit var edtPhoneRx: EditText
+    private lateinit var edtMaxSms: EditText
+    private lateinit var edtInterval: EditText
+    private lateinit var imgLedGps: ImageView
+    private lateinit var txtTimer: TextView
+    private lateinit var txtSmsCounter: TextView
+    private lateinit var btnStartTx: Button
+    private lateinit var btnStopTx: Button
 
-    private val updateReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+    private val updateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent) {
 
-            val isRunning = intent.getBooleanExtra("isRunning", false)
-            val smsSent = intent.getIntExtra("smsSent", 0)
-            val maxSms = intent.getIntExtra("maxSms", 0)
-            val secondsRemaining = intent.getIntExtra("secondsRemaining", 0)
-            val gpsFix = intent.getBooleanExtra("gpsFix", false)
+            val isRunning =
+                intent.getBooleanExtra("isRunning", false)
 
-            txtSmsCounter?.text = "SMS: $smsSent/$maxSms"
+            val smsSent =
+                intent.getIntExtra("smsSent", 0)
 
-            val min = secondsRemaining / 60
-            val sec = secondsRemaining % 60
-            txtTimer?.text = String.format("%02d:%02d", min, sec)
+            val maxSms =
+                intent.getIntExtra("maxSms", 0)
 
-            imgLedGps?.setImageResource(
-                if (gpsFix) R.drawable.led_green else R.drawable.led_red
+            val elapsed =
+                intent.getLongExtra("elapsedSeconds", 0)
+
+            val gpsFix =
+                intent.getBooleanExtra("gpsFix", false)
+
+            txtSmsCounter.text =
+                "SMS: $smsSent/$maxSms"
+
+            txtTimer.text =
+                "Tempo: ${elapsed}s"
+
+            imgLedGps.setImageResource(
+                if (gpsFix)
+                    R.drawable.led_green
+                else
+                    R.drawable.led_red
             )
 
-            btnStartTx?.isEnabled = !isRunning
-            btnStopTx?.isEnabled = isRunning
+            btnStartTx.isEnabled = !isRunning
+            btnStopTx.isEnabled = isRunning
         }
     }
 
@@ -63,10 +68,11 @@ class TxActivity : AppCompatActivity() {
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
 
-        btnStartTx?.setOnClickListener { startTxService() }
-        btnStopTx?.setOnClickListener { stopTxService() }
+        btnStartTx.setOnClickListener { startTxService() }
+        btnStopTx.setOnClickListener { stopTxService() }
 
-        val filter = IntentFilter(TxForegroundService.ACTION_UPDATE)
+        val filter =
+            IntentFilter(TxForegroundService.ACTION_UPDATE)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
@@ -75,17 +81,46 @@ class TxActivity : AppCompatActivity() {
                 Context.RECEIVER_NOT_EXPORTED
             )
         } else {
-            @Suppress("DEPRECATION")
             registerReceiver(updateReceiver, filter)
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+
+        val intent = Intent(
+            this,
+            TxForegroundService::class.java
+        )
+
+        intent.action =
+            TxForegroundService.ACTION_REQUEST_STATE
+
+        startService(intent)
+    }
+
     private fun startTxService() {
-        val intent = Intent(this, TxForegroundService::class.java)
-        intent.action = TxForegroundService.ACTION_START
-        intent.putExtra("phone", edtPhoneRx?.text.toString())
-        intent.putExtra("maxSms", edtMaxSms?.text.toString().toIntOrNull() ?: 0)
-        intent.putExtra("interval", edtInterval?.text.toString().toIntOrNull() ?: 0)
+
+        val intent =
+            Intent(this, TxForegroundService::class.java)
+
+        intent.action =
+            TxForegroundService.ACTION_START
+
+        intent.putExtra(
+            "phone",
+            edtPhoneRx.text.toString()
+        )
+
+        intent.putExtra(
+            "maxSms",
+            edtMaxSms.text.toString().toIntOrNull() ?: 0
+        )
+
+        intent.putExtra(
+            "interval",
+            edtInterval.text.toString().toIntOrNull() ?: 1
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -95,8 +130,13 @@ class TxActivity : AppCompatActivity() {
     }
 
     private fun stopTxService() {
-        val intent = Intent(this, TxForegroundService::class.java)
-        intent.action = TxForegroundService.ACTION_STOP
+
+        val intent =
+            Intent(this, TxForegroundService::class.java)
+
+        intent.action =
+            TxForegroundService.ACTION_STOP
+
         startService(intent)
     }
 

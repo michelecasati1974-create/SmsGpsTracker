@@ -23,6 +23,7 @@ public class TxForegroundService extends Service {
     public static final String ACTION_START = "ACTION_START";
     public static final String ACTION_STOP = "ACTION_STOP";
     public static final String ACTION_UPDATE = "com.example.smsgpstracker.ACTION_UPDATE";
+    public static final String ACTION_REQUEST_STATE = "ACTION_REQUEST_STATE";
 
     private static final String CHANNEL_ID = "TxServiceChannel";
 
@@ -34,8 +35,11 @@ public class TxForegroundService extends Service {
     private int intervalMinutes = 1;
     private String phoneNumber = "";
 
+    private long cycleStartTime = 0;
+
     private Handler handler = new Handler(Looper.getMainLooper());
-    private int secondsRemaining = 0;
+    private Handler uiHandler = new Handler(Looper.getMainLooper());
+    private Runnable uiRunnable;
 
     @Override
     public void onCreate() {
@@ -59,14 +63,20 @@ public class TxForegroundService extends Service {
             }
 
             if (ACTION_STOP.equals(action)) {
-                stopTracking(true); // STOP MANUALE
+                stopTracking(true);
+            }
+
+            if (ACTION_REQUEST_STATE.equals(action)) {
+                sendUpdate(false);
             }
         }
 
         return START_STICKY;
     }
 
+
     private void startTracking() {
+
 
         if (isRunning) return;
 
@@ -81,9 +91,25 @@ public class TxForegroundService extends Service {
         sendUpdate(false);
     }
 
-    private void startTimer() {
+    private void startUiTimer() {
 
-        secondsRemaining = intervalMinutes * 60;
+        uiRunnable = new Runnable() {
+            @Override
+            public void run() {
+
+                if (!isRunning) return;
+
+                sendUpdate(false);
+
+                uiHandler.postDelayed(this, 1000);
+            }
+        };
+
+        uiHandler.post(uiRunnable);
+    }
+
+    private void startTimer() {
+        startUiTimer();
 
         handler.postDelayed(new Runnable() {
             @Override
@@ -91,25 +117,20 @@ public class TxForegroundService extends Service {
 
                 if (!isRunning) return;
 
-                secondsRemaining--;
+                cycleStartTime = System.currentTimeMillis();
 
-                if (secondsRemaining <= 0) {
-                    requestLocation();
-                    secondsRemaining = intervalMinutes * 60;
-                }
+                requestLocation();
 
-                sendUpdate(false);
-                handler.postDelayed(this, 1000);
+                handler.postDelayed(this, intervalMinutes * 60 * 1000L);
             }
         }, 1000);
     }
 
     private void requestLocation() {
 
-        // 🔥 FINE CICLO AUTOMATICO
         if (smsSent >= maxSms) {
             sendControlSms("CTRL:END");
-            stopTracking(false); // STOP AUTOMATICO
+            stopTracking(false);
             return;
         }
 
@@ -165,10 +186,6 @@ public class TxForegroundService extends Service {
         sendUpdate(true);
     }
 
-    /**
-     * manualStop = true  -> invia CTRL:STOP
-     * manualStop = false -> non invia STOP (usato dopo END)
-     */
     private void stopTracking(boolean manualStop) {
 
         if (!isRunning) return;
@@ -188,13 +205,20 @@ public class TxForegroundService extends Service {
 
     private void sendUpdate(boolean gpsFix) {
 
+        long elapsed = 0;
+
+        if (cycleStartTime > 0) {
+            elapsed =
+                    (System.currentTimeMillis() - cycleStartTime) / 1000;
+        }
+
         Intent intent = new Intent(ACTION_UPDATE);
         intent.setPackage(getPackageName());
 
         intent.putExtra("isRunning", isRunning);
         intent.putExtra("smsSent", smsSent);
         intent.putExtra("maxSms", maxSms);
-        intent.putExtra("secondsRemaining", secondsRemaining);
+        intent.putExtra("elapsedSeconds", elapsed);
         intent.putExtra("gpsFix", gpsFix);
 
         sendBroadcast(intent);
