@@ -17,6 +17,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.CameraUpdateFactory
+import kotlinx.coroutines.delay
+import androidx.lifecycle.lifecycleScope
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -100,12 +104,12 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 "CTRL:STOP" -> {
                     txtStatus.text = "Tracking fermato"
-                    saveSnapshotThenReset()
+                    completeTracking()
                 }
 
                 "CTRL:END" -> {
                     txtStatus.text = "Tracking completato"
-                    saveSnapshotThenReset()
+                    completeTracking()
                 }
 
                 "GPS" -> {
@@ -124,6 +128,40 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     }
                 }
             }
+        }
+    }
+
+    private fun completeTracking() {
+
+        if (!mapReady || trackPoints.isEmpty()) return
+
+        lifecycleScope.launch {
+
+            delay(600)
+
+            try {
+
+                val bounds = LatLngBounds.Builder().apply {
+                    trackPoints.forEach { include(it) }
+                }.build()
+
+                googleMap.animateCamera(
+                    CameraUpdateFactory.newLatLngBounds(bounds, 150)
+                )
+
+            } catch (e: Exception) {
+
+                googleMap.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(
+                        trackPoints.last(),
+                        16f
+                    )
+                )
+            }
+
+            delay(800)
+
+            saveSnapshotThenReset()
         }
     }
 
@@ -166,28 +204,95 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun saveSnapshotThenReset() {
 
-        if (!mapReady) return
+        if (!mapReady || trackPoints.isEmpty()) return
 
-        googleMap.snapshot { bitmap ->
+        val last = trackPoints.last()
 
-            if (bitmap != null) {
+        lifecycleScope.launch {
 
-                saveBitmap(bitmap)
+            val address =
+                getAddressText(
+                    last.latitude,
+                    last.longitude
+                )
 
-                Toast.makeText(
-                    this,
-                    "Snapshot salvato",
-                    Toast.LENGTH_LONG
-                ).show()
+            googleMap.snapshot { bitmap ->
 
-                resetMapOnly()
+                if (bitmap != null) {
+
+                    saveBitmapWithText(
+                        bitmap,
+                        address
+                    )
+
+                    Toast.makeText(
+                        this@RxActivity,
+                        "Snapshot salvato",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    resetMapOnly()
+                }
             }
         }
     }
 
-    private fun saveBitmap(bitmap: Bitmap) {
+    private suspend fun getAddressText(
+        lat: Double,
+        lon: Double
+    ): String {
+
+        return try {
+
+            val geocoder =
+                android.location.Geocoder(
+                    this,
+                    Locale.getDefault()
+                )
+
+            val list =
+                geocoder.getFromLocation(lat, lon, 1)
+
+            if (!list.isNullOrEmpty()) {
+
+                val addr = list[0]
+                val comune = addr.locality ?: ""
+                val provincia = addr.adminArea ?: ""
+
+                "$comune ($provincia)"
+            } else "Località sconosciuta"
+
+        } catch (e: Exception) {
+            "Località sconosciuta"
+        }
+    }
+
+    private fun saveBitmapWithText(
+        bitmap: Bitmap,
+        address: String
+    ) {
 
         lifecycleScope.launch(Dispatchers.IO) {
+
+            val mutable =
+                bitmap.copy(Bitmap.Config.ARGB_8888, true)
+
+            val canvas =
+                android.graphics.Canvas(mutable)
+
+            val paint =
+                android.graphics.Paint().apply {
+                    color = android.graphics.Color.RED
+                    textSize = 60f
+                    isAntiAlias = true
+                }
+
+            canvas.drawText(
+                address,
+                50f,
+                80f,
+                paint
+            )
 
             val folder =
                 getExternalFilesDir(
@@ -204,10 +309,11 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 File(folder, "TRACK_$time.jpg")
 
             FileOutputStream(file).use {
-                bitmap.compress(
+                mutable.compress(
                     Bitmap.CompressFormat.JPEG,
                     95,
-                    it)
+                    it
+                )
             }
         }
     }

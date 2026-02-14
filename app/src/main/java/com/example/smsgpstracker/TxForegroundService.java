@@ -15,8 +15,8 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 
 import com.google.android.gms.location.*;
-import android.os.Looper;
 
+import android.os.Looper;
 
 public class TxForegroundService extends Service {
 
@@ -27,7 +27,6 @@ public class TxForegroundService extends Service {
     private static final String CHANNEL_ID = "TxServiceChannel";
 
     private FusedLocationProviderClient fusedClient;
-    private LocationCallback locationCallback;
 
     private boolean isRunning = false;
     private int smsSent = 0;
@@ -60,7 +59,7 @@ public class TxForegroundService extends Service {
             }
 
             if (ACTION_STOP.equals(action)) {
-                stopTracking();
+                stopTracking(true); // STOP MANUALE
             }
         }
 
@@ -76,7 +75,7 @@ public class TxForegroundService extends Service {
 
         startForeground(1, buildNotification());
 
-        sendControlSms("CTRL:START");   // 🔴 AGGIUNGI QUESTA RIGA
+        sendControlSms("CTRL:START");
 
         startTimer();
         sendUpdate(false);
@@ -107,9 +106,10 @@ public class TxForegroundService extends Service {
 
     private void requestLocation() {
 
+        // 🔥 FINE CICLO AUTOMATICO
         if (smsSent >= maxSms) {
-            sendControlSms("CTRL:END");   // 🔴 AGGIUNGI
-            stopTracking();
+            sendControlSms("CTRL:END");
+            stopTracking(false); // STOP AUTOMATICO
             return;
         }
 
@@ -119,11 +119,31 @@ public class TxForegroundService extends Service {
             return;
         }
 
-        fusedClient.getLastLocation().addOnSuccessListener(location -> {
-            if (location != null) {
-                sendSms(location);
-            }
-        });
+        LocationRequest request =
+                LocationRequest.create()
+                        .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                        .setInterval(2000)
+                        .setNumUpdates(1);
+
+        fusedClient.requestLocationUpdates(
+                request,
+                new LocationCallback() {
+                    @Override
+                    public void onLocationResult(LocationResult result) {
+
+                        if (result == null) return;
+
+                        Location location = result.getLastLocation();
+
+                        if (location != null) {
+                            sendSms(location);
+                        }
+
+                        fusedClient.removeLocationUpdates(this);
+                    }
+                },
+                Looper.getMainLooper()
+        );
     }
 
     private void sendSms(Location location) {
@@ -145,11 +165,17 @@ public class TxForegroundService extends Service {
         sendUpdate(true);
     }
 
-    private void stopTracking() {
+    /**
+     * manualStop = true  -> invia CTRL:STOP
+     * manualStop = false -> non invia STOP (usato dopo END)
+     */
+    private void stopTracking(boolean manualStop) {
 
         if (!isRunning) return;
 
-        sendControlSms("CTRL:STOP");   // 🔴 AGGIUNGI
+        if (manualStop) {
+            sendControlSms("CTRL:STOP");
+        }
 
         isRunning = false;
         handler.removeCallbacksAndMessages(null);
@@ -200,13 +226,14 @@ public class TxForegroundService extends Service {
             manager.createNotificationChannel(channel);
         }
     }
+
     private void sendControlSms(String text) {
 
         if (phoneNumber == null || phoneNumber.isEmpty()) return;
 
         SmsManager smsManager;
 
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             smsManager = getSystemService(SmsManager.class);
         } else {
             smsManager = SmsManager.getDefault();
@@ -226,5 +253,4 @@ public class TxForegroundService extends Service {
     public IBinder onBind(Intent intent) {
         return null;
     }
-
 }

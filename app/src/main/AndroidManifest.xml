@@ -66,9 +66,13 @@
             android:exported="false" />
 
         <!-- ===== RX ===== -->
+
+
         <activity
             android:name=".RxActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize"/>
 
         <!-- ===== SMS RECEIVER ===== -->
         <receiver
