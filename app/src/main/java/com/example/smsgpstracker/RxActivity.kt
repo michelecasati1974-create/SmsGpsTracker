@@ -18,6 +18,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+import java.io.File
+import java.io.FileOutputStream
+import android.content.ContentValues
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+
+
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -37,6 +45,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     // =====================================================
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
+
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx)
@@ -51,9 +61,30 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mapFragment.getMapAsync(this)
 
+        // =====================================================
+        // RUNTIME STORAGE PERMISSION (SOLO ANDROID 7–9)
+        // =====================================================
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+
+            if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+
+                requestPermissions(
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    2001
+                )
+            }
+        }
+
+
+        // =====================================================
+        // SMS RECEIVER (Compat Android 7 → 15)
+        // =====================================================
+
         val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
 
-        if (Build.VERSION.SDK_INT >= 33) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
                 smsReceiver,
                 filter,
@@ -64,6 +95,29 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
         receiverRegistered = true
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == 2001) {
+            if (grantResults.isNotEmpty()
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+
+                Toast.makeText(this, "Permesso storage concesso", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Permesso storage NEGATO", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    @Suppress("MissingSuperCall")
+    override fun onBackPressed() {
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {
@@ -127,6 +181,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 }
             }
         }
+
     }
 
     // =====================================================
@@ -214,7 +269,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             return
         }
 
-        // Assicurati che polilinee e marker siano già disegnati
         drawAllPoints()
 
         googleMap.setOnMapLoadedCallback {
@@ -266,40 +320,73 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         paintText
                     )
 
+                    val readableDate = SimpleDateFormat(
+                        "dd/MM/yyyy HH:mm:ss",
+                        Locale.getDefault()
+                    ).format(Date())
+
+                    canvas.drawText(
+                        readableDate,
+                        60f,
+                        200f,
+                        paintText
+                    )
+
                     val time =
                         SimpleDateFormat(
                             "yyyyMMdd_HHmmss",
                             Locale.getDefault()
                         ).format(Date())
 
-                    val values = ContentValues().apply {
-                        put(
-                            MediaStore.Images.Media.DISPLAY_NAME,
-                            "TRACK_$time.jpg"
-                        )
-                        put(
-                            MediaStore.Images.Media.MIME_TYPE,
-                            "image/jpeg"
-                        )
-                        put(
-                            MediaStore.Images.Media.RELATIVE_PATH,
-                            Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
-                        )
-                    }
+                    try {
 
-                    val uri = contentResolver.insert(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        values
-                    )
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 
-                    uri?.let {
-                        contentResolver.openOutputStream(it)?.use { out ->
-                            bitmap.compress(
-                                Bitmap.CompressFormat.JPEG,
-                                95,
-                                out
+                            // ANDROID 10+
+                            val values = ContentValues().apply {
+                                put(MediaStore.Images.Media.DISPLAY_NAME, "TRACK_$time.jpg")
+                                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                                put(
+                                    MediaStore.Images.Media.RELATIVE_PATH,
+                                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
+                                )
+                            }
+
+                            val uri = contentResolver.insert(
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                values
                             )
+
+                            uri?.let {
+                                contentResolver.openOutputStream(it)?.use { out ->
+                                    bitmap.compress(
+                                        Bitmap.CompressFormat.JPEG,
+                                        95,
+                                        out
+                                    )
+                                }
+                            }
+
+                        } else {
+
+                            // ANDROID 7, 8, 9
+                            val root = Environment.getExternalStorageDirectory()
+                            val directory = File(root, "Pictures/SmsGpsTracker")
+
+                            if (!directory.exists()) {
+                                directory.mkdirs()
+                            }
+
+                            val file = File(directory, "TRACK_$time.jpg")
+
+                            val out = FileOutputStream(file)
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                            out.flush()
+                            out.close()
                         }
+
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
 
                     launch(Dispatchers.Main) {
@@ -310,7 +397,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
     }
-
 
     private fun saveBitmapWithText(
         bitmap: Bitmap,
@@ -352,6 +438,18 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
             canvas.drawText(
                 "Lon: ${last.longitude}",
+                40f,
+                155f,
+                paint
+            )
+
+            val readableDate = SimpleDateFormat(
+                "dd/MM/yyyy HH:mm:ss",
+                Locale.getDefault()
+            ).format(Date())
+
+            canvas.drawText(
+                readableDate,
                 40f,
                 155f,
                 paint
@@ -431,3 +529,4 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtLast.text = "Ultima: --"
     }
 }
+
