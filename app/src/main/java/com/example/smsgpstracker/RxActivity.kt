@@ -2,29 +2,24 @@ package com.example.smsgpstracker
 
 import android.annotation.SuppressLint
 import android.content.*
-import android.graphics.*
-import android.location.Geocoder
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
-import com.google.android.gms.maps.*
-import com.google.android.gms.maps.model.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.*
-import java.io.File
-import java.io.FileOutputStream
-import android.content.ContentValues
 import android.Manifest
 import android.content.pm.PackageManager
 import android.widget.Toast
-
+import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.maps.*
+import com.google.android.gms.maps.model.*
+import java.net.URL
+import android.widget.Switch
+import android.location.Geocoder
+import java.text.SimpleDateFormat
+import java.util.*
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
 
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
@@ -36,17 +31,115 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private var mapReady = false
     private var receiverRegistered = false
-    private var snapshotInProgress = false
 
     private val trackPoints = mutableListOf<LatLng>()
+
+    // =====================================================
+    // BROADCAST RECEIVER (UNICO E CORRETTO)
+    // =====================================================
+
+    private val smsReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            intent ?: return
+            val msg = intent.getStringExtra("SMS_BODY") ?: return
+
+            when (msg) {
+
+                "CTRL:START" -> {
+
+                    txtStatus.text = "Tracking avviato"
+                    resetMapOnly()
+
+                    val serviceIntent =
+                        Intent(this@RxActivity, RxForegroundService::class.java)
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        startForegroundService(serviceIntent)
+                    else
+                        startService(serviceIntent)
+                }
+
+                "CTRL:STOP",
+                "CTRL:END" -> {
+
+                    txtStatus.text = "Tracking completato"
+
+                    val serviceIntent =
+                        Intent(this@RxActivity, RxForegroundService::class.java)
+
+                    serviceIntent.action = "END_TRACK"
+                    startService(serviceIntent)
+
+                    resetMapOnly()
+                }
+
+                "GPS" -> {
+
+                    val lat = intent.getDoubleExtra("lat", 0.0)
+                    val lon = intent.getDoubleExtra("lon", 0.0)
+
+                    val point = LatLng(lat, lon)
+                    trackPoints.add(point)
+
+                    if (mapReady) {
+                        drawAllPoints()
+                    }
+
+                    // Invia anche al Service
+                    val serviceIntent =
+                        Intent(this@RxActivity, RxForegroundService::class.java)
+
+                    serviceIntent.action = "ADD_POINT"
+                    serviceIntent.putExtra("lat", lat)
+                    serviceIntent.putExtra("lon", lon)
+
+                    startService(serviceIntent)
+                }
+            }
+        }
+    }
+
+    private var cycloOverlay: TileOverlay? = null
+    private var isCycloEnabled = false
+    private fun enableCycloOverlay() {
+
+        if (!mapReady) return
+        if (cycloOverlay != null) return
+
+        val tileProvider = object : UrlTileProvider(256, 256) {
+            override fun getTileUrl(x: Int, y: Int, zoom: Int): URL? {
+                return try {
+                    URL("https://a.tile-cyclosm.openstreetmap.fr/cyclosm/$zoom/$x/$y.png")
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        }
+
+        cycloOverlay = googleMap.addTileOverlay(
+            TileOverlayOptions()
+                .tileProvider(tileProvider)
+                .fadeIn(true)
+        )
+
+        isCycloEnabled = true
+    }
+
+    private fun disableCycloOverlay() {
+        cycloOverlay?.remove()
+        cycloOverlay = null
+        isCycloEnabled = false
+    }
+
+
 
     // =====================================================
     // ON CREATE
     // =====================================================
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
-
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx)
@@ -61,10 +154,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mapFragment.getMapAsync(this)
 
-        // =====================================================
-        // RUNTIME STORAGE PERMISSION (SOLO ANDROID 7–9)
-        // =====================================================
-
+        // STORAGE PERMISSION Android 7–9
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
 
             if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -77,11 +167,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
 
-
-        // =====================================================
-        // SMS RECEIVER (Compat Android 7 → 15)
-        // =====================================================
-
+        // Register Receiver
         val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -95,6 +181,29 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
         receiverRegistered = true
+
+        val switchMapType = findViewById<Switch>(R.id.switchMapType)
+
+        switchMapType.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                enableCycloOverlay()
+            } else {
+                disableCycloOverlay()
+            }
+        }
+
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (receiverRegistered) {
+            unregisterReceiver(smsReceiver)
+        }
+    }
+
+    @Suppress("MissingSuperCall")
+    override fun onBackPressed() {
+        moveTaskToBack(true)
     }
 
     override fun onRequestPermissionsResult(
@@ -115,18 +224,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    @Suppress("MissingSuperCall")
-    override fun onBackPressed() {
-        moveTaskToBack(true)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        if (receiverRegistered) {
-            unregisterReceiver(smsReceiver)
-        }
-    }
-
     // =====================================================
     // MAP READY
     // =====================================================
@@ -141,104 +238,21 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     // =====================================================
-    // BROADCAST RECEIVER
-    // =====================================================
-
-    private val smsReceiver = object : BroadcastReceiver() {
-
-        override fun onReceive(context: Context?, intent: Intent?) {
-
-            intent ?: return
-            val msg = intent.getStringExtra("SMS_BODY") ?: return
-
-            when (msg) {
-
-                "CTRL:START" -> {
-                    txtStatus.text = "Tracking avviato"
-                    resetMapOnly()
-                }
-
-                "CTRL:STOP",
-                "CTRL:END" -> {
-                    txtStatus.text = "Tracking completato"
-                    completeTracking()
-                }
-
-                "GPS" -> {
-
-                    val lat =
-                        intent.getDoubleExtra("lat", 0.0)
-                    val lon =
-                        intent.getDoubleExtra("lon", 0.0)
-
-                    val point = LatLng(lat, lon)
-
-                    trackPoints.add(point)
-
-                    if (mapReady) {
-                        drawAllPoints()
-                    }
-                }
-            }
-        }
-
-    }
-
-    // =====================================================
-    // COMPLETE TRACKING
-    // =====================================================
-
-    private fun completeTracking() {
-
-        if (!mapReady || trackPoints.isEmpty()) return
-        if (snapshotInProgress) return
-
-        snapshotInProgress = true
-
-        lifecycleScope.launch {
-
-            delay(500)
-
-            try {
-
-                if (trackPoints.size > 1) {
-
-                    val bounds = LatLngBounds.Builder().apply {
-                        trackPoints.forEach { include(it) }
-                    }.build()
-
-                    googleMap.animateCamera(
-                        CameraUpdateFactory.newLatLngBounds(bounds, 150)
-                    )
-                } else {
-
-                    googleMap.animateCamera(
-                        CameraUpdateFactory.newLatLngZoom(
-                            trackPoints.last(),
-                            16f
-                        )
-                    )
-                }
-
-            } catch (_: Exception) {}
-
-            delay(700)
-
-            saveSnapshotThenReset()
-        }
-    }
-
-    // =====================================================
     // DRAW MAP
     // =====================================================
+
+    private var trackPolyline: Polyline? = null
+    private var lastMarker: Marker? = null
 
     private fun drawAllPoints() {
 
         if (!mapReady || trackPoints.isEmpty()) return
 
-        googleMap.clear()
+        trackPolyline?.remove()
+        lastMarker?.remove()
 
-        googleMap.addPolyline(
+        // Disegna polilinea
+        trackPolyline = googleMap.addPolyline(
             PolylineOptions()
                 .addAll(trackPoints)
                 .width(6f)
@@ -247,272 +261,82 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         val last = trackPoints.last()
 
-        googleMap.addMarker(
+        // 📅 DATA ORA
+        val sdf = SimpleDateFormat(
+            "dd/MM/yyyy HH:mm:ss",
+            Locale.getDefault()
+        )
+        val dateTime = sdf.format(Date())
+
+        // 📍 GEOCODER
+        var country = ""
+        var city = ""
+        var province = ""
+
+        try {
+            val geocoder = Geocoder(this, Locale.getDefault())
+            val addresses =
+                geocoder.getFromLocation(
+                    last.latitude,
+                    last.longitude,
+                    1
+                )
+
+            if (!addresses.isNullOrEmpty()) {
+                val addr = addresses[0]
+                country = addr.countryName ?: ""
+                city = addr.locality ?: ""
+                province = addr.adminArea ?: ""
+            }
+
+        } catch (e: Exception) {}
+
+        // 🔴 MARKER ROSSO CON INFO COMPLETE
+        lastMarker = googleMap.addMarker(
             MarkerOptions()
                 .position(last)
-                .title("Ultima posizione")
+                .title("$city ($province)")
+                .snippet("$country\n$dateTime")
+                .icon(
+                    BitmapDescriptorFactory.defaultMarker(
+                        BitmapDescriptorFactory.HUE_RED
+                    )
+                )
         )
+
+        lastMarker?.showInfoWindow()
+
+        // 🔎 AUTO ZOOM SU TUTTI I PUNTI
+        if (trackPoints.size > 1) {
+
+            val builder = LatLngBounds.Builder()
+            for (point in trackPoints) {
+                builder.include(point)
+            }
+
+            val bounds = builder.build()
+
+            googleMap.animateCamera(
+                CameraUpdateFactory.newLatLngBounds(
+                    bounds,
+                    150   // padding
+                )
+            )
+
+        } else {
+            googleMap.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(
+                    last,
+                    16f
+                )
+            )
+        }
 
         txtCount.text = "Punti: ${trackPoints.size}"
         txtLast.text =
             "Ultima:\n${last.latitude}, ${last.longitude}"
     }
 
-    // =====================================================
-    // SNAPSHOT
-    // =====================================================
-
-    private fun saveSnapshotThenReset() {
-
-        if (trackPoints.isEmpty()) {
-            snapshotInProgress = false
-            return
-        }
-
-        drawAllPoints()
-
-        googleMap.setOnMapLoadedCallback {
-
-            googleMap.snapshot { mapBitmap ->
-
-                if (mapBitmap == null) {
-                    snapshotInProgress = false
-                    return@snapshot
-                }
-
-                lifecycleScope.launch(Dispatchers.IO) {
-
-                    val bitmap = mapBitmap.copy(
-                        Bitmap.Config.ARGB_8888,
-                        true
-                    )
-
-                    val canvas = Canvas(bitmap)
-
-                    val paintText = Paint().apply {
-                        color = Color.BLACK
-                        textSize = 40f
-                        isAntiAlias = true
-                        typeface = Typeface.DEFAULT_BOLD
-                    }
-
-                    val last = trackPoints.last()
-
-                    val address =
-                        getAddressText(last.latitude, last.longitude)
-
-                    canvas.drawText(address, 60f, 70f, paintText)
-
-                    paintText.textSize = 34f
-                    paintText.typeface = Typeface.DEFAULT
-
-                    canvas.drawText(
-                        "Lat: ${last.latitude}",
-                        60f,
-                        120f,
-                        paintText
-                    )
-
-                    canvas.drawText(
-                        "Lon: ${last.longitude}",
-                        60f,
-                        160f,
-                        paintText
-                    )
-
-                    val readableDate = SimpleDateFormat(
-                        "dd/MM/yyyy HH:mm:ss",
-                        Locale.getDefault()
-                    ).format(Date())
-
-                    canvas.drawText(
-                        readableDate,
-                        60f,
-                        200f,
-                        paintText
-                    )
-
-                    val time =
-                        SimpleDateFormat(
-                            "yyyyMMdd_HHmmss",
-                            Locale.getDefault()
-                        ).format(Date())
-
-                    try {
-
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-
-                            // ANDROID 10+
-                            val values = ContentValues().apply {
-                                put(MediaStore.Images.Media.DISPLAY_NAME, "TRACK_$time.jpg")
-                                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                                put(
-                                    MediaStore.Images.Media.RELATIVE_PATH,
-                                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
-                                )
-                            }
-
-                            val uri = contentResolver.insert(
-                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                values
-                            )
-
-                            uri?.let {
-                                contentResolver.openOutputStream(it)?.use { out ->
-                                    bitmap.compress(
-                                        Bitmap.CompressFormat.JPEG,
-                                        95,
-                                        out
-                                    )
-                                }
-                            }
-
-                        } else {
-
-                            // ANDROID 7, 8, 9
-                            val root = Environment.getExternalStorageDirectory()
-                            val directory = File(root, "Pictures/SmsGpsTracker")
-
-                            if (!directory.exists()) {
-                                directory.mkdirs()
-                            }
-
-                            val file = File(directory, "TRACK_$time.jpg")
-
-                            val out = FileOutputStream(file)
-                            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-                            out.flush()
-                            out.close()
-                        }
-
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-
-                    launch(Dispatchers.Main) {
-                        resetMapOnly()
-                        snapshotInProgress = false
-                    }
-                }
-            }
-        }
-    }
-
-    private fun saveBitmapWithText(
-        bitmap: Bitmap,
-        address: String
-    ) {
-
-        lifecycleScope.launch(Dispatchers.IO) {
-
-            val mutable =
-                bitmap.copy(Bitmap.Config.ARGB_8888, true)
-
-            val canvas = Canvas(mutable)
-
-            val paint = Paint().apply {
-                color = Color.BLACK
-                textSize = 40f
-                isAntiAlias = true
-                typeface = Typeface.DEFAULT_BOLD
-            }
-
-            val last = trackPoints.last()
-
-            canvas.drawText(
-                address,
-                40f,
-                70f,
-                paint
-            )
-
-            paint.textSize = 34f
-            paint.typeface = Typeface.DEFAULT
-
-            canvas.drawText(
-                "Lat: ${last.latitude}",
-                40f,
-                115f,
-                paint
-            )
-
-            canvas.drawText(
-                "Lon: ${last.longitude}",
-                40f,
-                155f,
-                paint
-            )
-
-            val readableDate = SimpleDateFormat(
-                "dd/MM/yyyy HH:mm:ss",
-                Locale.getDefault()
-            ).format(Date())
-
-            canvas.drawText(
-                readableDate,
-                40f,
-                155f,
-                paint
-            )
-
-            val time =
-                SimpleDateFormat(
-                    "yyyyMMdd_HHmmss",
-                    Locale.getDefault()
-                ).format(Date())
-
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "TRACK_$time.jpg")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(
-                    MediaStore.Images.Media.RELATIVE_PATH,
-                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
-                )
-            }
-
-            val uri = contentResolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                values
-            )
-
-            uri?.let {
-                contentResolver.openOutputStream(it)?.use { out ->
-                    mutable.compress(
-                        Bitmap.CompressFormat.JPEG,
-                        95,
-                        out
-                    )
-                }
-            }
-        }
-    }
-
-    private suspend fun getAddressText(
-        lat: Double,
-        lon: Double
-    ): String {
-
-        return try {
-
-            val geocoder =
-                Geocoder(this, Locale.getDefault())
-
-            val list =
-                geocoder.getFromLocation(lat, lon, 1)
-
-            if (!list.isNullOrEmpty()) {
-
-                val addr = list[0]
-                val comune = addr.locality ?: ""
-                val provincia = addr.adminArea ?: ""
-
-                "$comune ($provincia)"
-            } else "Località sconosciuta"
-
-        } catch (_: Exception) {
-            "Località sconosciuta"
-        }
-    }
 
     // =====================================================
     // RESET
@@ -522,8 +346,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         trackPoints.clear()
 
-        if (mapReady)
-            googleMap.clear()
+        trackPolyline?.remove()
+        lastMarker?.remove()
 
         txtCount.text = "Punti: 0"
         txtLast.text = "Ultima: --"

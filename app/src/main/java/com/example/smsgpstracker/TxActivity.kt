@@ -1,11 +1,16 @@
 package com.example.smsgpstracker
 
+
+
 import android.content.*
 import android.os.Build
 import android.os.Bundle
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import android.annotation.SuppressLint
+import android.graphics.Color
+import android.util.Log
+
 
 class TxActivity : AppCompatActivity() {
 
@@ -17,47 +22,47 @@ class TxActivity : AppCompatActivity() {
     private lateinit var txtSmsCounter: TextView
     private lateinit var btnStartTx: Button
     private lateinit var btnStopTx: Button
+    private lateinit var prefs: SharedPreferences
+
 
     private val updateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent) {
 
-            val isRunning =
-                intent.getBooleanExtra("isRunning", false)
+        override fun onReceive(context: Context?, intent: Intent?) {
 
-            val smsSent =
-                intent.getIntExtra("smsSent", 0)
+            val statusString = intent?.getStringExtra("status") ?: return
+            val timer = intent.getIntExtra("timer", 0)
+            val smsCount = intent.getIntExtra("smsCount", 0)
 
-            val maxSms =
-                intent.getIntExtra("maxSms", 0)
+            txtTimer.text = "Tempo: $timer s"
+            txtSmsCounter.text = "SMS: $smsCount"
 
-            val elapsed =
-                intent.getLongExtra("elapsedSeconds", 0)
+            val status = TxStatus.valueOf(statusString)
+            updateLed(status)
 
-            val gpsFix =
-                intent.getBooleanExtra("gpsFix", false)
-
-            txtSmsCounter.text =
-                "SMS: $smsSent/$maxSms"
-
-            txtTimer.text =
-                "Tempo: ${elapsed}s"
-
-            imgLedGps.setImageResource(
-                if (gpsFix)
-                    R.drawable.led_green
-                else
-                    R.drawable.led_red
-            )
-
-            btnStartTx.isEnabled = !isRunning
-            btnStopTx.isEnabled = isRunning
+            when (status) {
+                TxStatus.IDLE -> {
+                    btnStartTx.isEnabled = true
+                    btnStopTx.isEnabled = false
+                }
+                TxStatus.WAITING,
+                TxStatus.TRACKING -> {
+                    btnStartTx.isEnabled = false
+                    btnStopTx.isEnabled = true
+                }
+            }
         }
+
+
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tx)
+
+        // =====================================================
+        // UI BINDING
+        // =====================================================
 
         edtPhoneRx = findViewById(R.id.edtPhoneRx)
         edtMaxSms = findViewById(R.id.edtMaxSms)
@@ -68,11 +73,52 @@ class TxActivity : AppCompatActivity() {
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
 
-        btnStartTx.setOnClickListener { startTxService() }
-        btnStopTx.setOnClickListener { stopTxService() }
+        // =====================================================
+        // SHARED PREFERENCES
+        // =====================================================
 
-        val filter =
-            IntentFilter(TxForegroundService.ACTION_UPDATE)
+        prefs = getSharedPreferences("TX_PREFS", MODE_PRIVATE)
+        val savedStatus =
+            prefs.getString("ledStatus", TxStatus.IDLE.name)
+
+        updateLed(TxStatus.valueOf(savedStatus!!))
+
+        // Carica valori salvati
+        edtPhoneRx.setText(prefs.getString("phone", ""))
+        edtMaxSms.setText(prefs.getInt("maxSms", 5).toString())
+        edtInterval.setText(prefs.getInt("interval", 10).toString())
+
+        // =====================================================
+        // BUTTON LISTENERS
+        // =====================================================
+
+        btnStartTx.setOnClickListener {
+            saveSettings()      // 🔥 Salva prima di partire
+            startTxService()
+
+        }
+
+        btnStopTx.setOnClickListener {
+            stopTxService()
+        }
+        when (TxStatus.valueOf(savedStatus!!)) {
+            TxStatus.IDLE -> {
+                btnStartTx.isEnabled = true
+                btnStopTx.isEnabled = false
+            }
+            TxStatus.WAITING,
+            TxStatus.TRACKING -> {
+                btnStartTx.isEnabled = false
+                btnStopTx.isEnabled = true
+            }
+        }
+
+        // =====================================================
+        // RECEIVER UPDATE DA SERVICE
+        // =====================================================
+
+        val filter = IntentFilter(TxForegroundService.ACTION_UPDATE)
+
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
@@ -85,19 +131,8 @@ class TxActivity : AppCompatActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
 
-        val intent = Intent(
-            this,
-            TxForegroundService::class.java
-        )
 
-        intent.action =
-            TxForegroundService.ACTION_REQUEST_STATE
-
-        startService(intent)
-    }
 
     private fun startTxService() {
 
@@ -127,6 +162,10 @@ class TxActivity : AppCompatActivity() {
         } else {
             startService(intent)
         }
+        if (edtPhoneRx.text.toString().isBlank()) {
+            Toast.makeText(this, "Inserisci numero telefono", Toast.LENGTH_SHORT).show()
+            return
+        }
     }
 
     private fun stopTxService() {
@@ -142,6 +181,47 @@ class TxActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(updateReceiver)
+        try {
+            unregisterReceiver(updateReceiver)
+        } catch (e: Exception) {}
     }
+
+    private fun saveSettings() {
+
+        val phone = edtPhoneRx.text.toString()
+        val maxSms = edtMaxSms.text.toString().toIntOrNull() ?: 5
+        val interval = edtInterval.text.toString().toIntOrNull() ?: 10
+
+        prefs.edit()
+            .putString("phone", phone)
+            .putInt("maxSms", maxSms)
+            .putInt("interval", interval)
+            .apply()
+    }
+    enum class TxStatus {
+        IDLE,
+        WAITING,
+        TRACKING
+    }
+    private var currentStatus = TxStatus.IDLE
+
+    private fun updateLed(status: TxStatus) {
+
+        currentStatus = status
+
+        val colorInt = when (status) {
+            TxStatus.IDLE -> Color.RED
+            TxStatus.WAITING -> Color.YELLOW
+            TxStatus.TRACKING -> Color.GREEN
+        }
+
+        imgLedGps.setColorFilter(colorInt, android.graphics.PorterDuff.Mode.SRC_IN)
+
+        prefs.edit()
+            .putString("ledStatus", status.name)
+            .apply()
+    }
+
+
+
 }

@@ -5,9 +5,7 @@ import android.app.*;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.Location;
-import android.os.Build;
-import android.os.Handler;
-import android.os.IBinder;
+import android.os.*;
 import android.telephony.SmsManager;
 
 import androidx.annotation.Nullable;
@@ -16,14 +14,12 @@ import androidx.core.app.NotificationCompat;
 
 import com.google.android.gms.location.*;
 
-import android.os.Looper;
-
 public class TxForegroundService extends Service {
 
     public static final String ACTION_START = "ACTION_START";
     public static final String ACTION_STOP = "ACTION_STOP";
-    public static final String ACTION_UPDATE = "com.example.smsgpstracker.ACTION_UPDATE";
-    public static final String ACTION_REQUEST_STATE = "ACTION_REQUEST_STATE";
+    public static final String ACTION_UPDATE =
+            "com.example.smsgpstracker.TX_UPDATE";
 
     private static final String CHANNEL_ID = "TxServiceChannel";
 
@@ -39,7 +35,14 @@ public class TxForegroundService extends Service {
 
     private Handler handler = new Handler(Looper.getMainLooper());
     private Handler uiHandler = new Handler(Looper.getMainLooper());
+
     private Runnable uiRunnable;
+
+    public enum TxStatus {
+        IDLE,
+        WAITING,
+        TRACKING
+    }
 
     @Override
     public void onCreate() {
@@ -65,30 +68,27 @@ public class TxForegroundService extends Service {
             if (ACTION_STOP.equals(action)) {
                 stopTracking(true);
             }
-
-            if (ACTION_REQUEST_STATE.equals(action)) {
-                sendUpdate(false);
-            }
         }
 
         return START_STICKY;
     }
 
-
     private void startTracking() {
-
 
         if (isRunning) return;
 
         isRunning = true;
         smsSent = 0;
+        cycleStartTime = System.currentTimeMillis();
 
         startForeground(1, buildNotification());
 
         sendControlSms("CTRL:START");
 
+        startUiTimer();
         startTimer();
-        sendUpdate(false);
+
+        sendUpdate(TxStatus.WAITING, 0, 0);
     }
 
     private void startUiTimer() {
@@ -99,7 +99,10 @@ public class TxForegroundService extends Service {
 
                 if (!isRunning) return;
 
-                sendUpdate(false);
+                int seconds =
+                        (int) ((System.currentTimeMillis() - cycleStartTime) / 1000);
+
+                sendUpdate(TxStatus.TRACKING, seconds, smsSent);
 
                 uiHandler.postDelayed(this, 1000);
             }
@@ -109,15 +112,12 @@ public class TxForegroundService extends Service {
     }
 
     private void startTimer() {
-        startUiTimer();
 
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
 
                 if (!isRunning) return;
-
-                cycleStartTime = System.currentTimeMillis();
 
                 requestLocation();
 
@@ -134,8 +134,8 @@ public class TxForegroundService extends Service {
             return;
         }
 
-        if (ActivityCompat.checkSelfPermission(this,
-                Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             return;
         }
@@ -183,7 +183,6 @@ public class TxForegroundService extends Service {
         );
 
         smsSent++;
-        sendUpdate(true);
     }
 
     private void stopTracking(boolean manualStop) {
@@ -195,31 +194,25 @@ public class TxForegroundService extends Service {
         }
 
         isRunning = false;
+
         handler.removeCallbacksAndMessages(null);
+        uiHandler.removeCallbacksAndMessages(null);
 
         stopForeground(true);
         stopSelf();
 
-        sendUpdate(false);
+        sendUpdate(TxStatus.IDLE, 0, 0);
     }
 
-    private void sendUpdate(boolean gpsFix) {
-
-        long elapsed = 0;
-
-        if (cycleStartTime > 0) {
-            elapsed =
-                    (System.currentTimeMillis() - cycleStartTime) / 1000;
-        }
+    private void sendUpdate(TxStatus status, int timer, int smsCount) {
 
         Intent intent = new Intent(ACTION_UPDATE);
-        intent.setPackage(getPackageName());
 
-        intent.putExtra("isRunning", isRunning);
-        intent.putExtra("smsSent", smsSent);
-        intent.putExtra("maxSms", maxSms);
-        intent.putExtra("elapsedSeconds", elapsed);
-        intent.putExtra("gpsFix", gpsFix);
+        intent.setPackage(getPackageName()); // 🔥 FONDAMENTALE
+
+        intent.putExtra("status", status.name());
+        intent.putExtra("timer", timer);
+        intent.putExtra("smsCount", smsCount);
 
         sendBroadcast(intent);
     }
@@ -263,13 +256,7 @@ public class TxForegroundService extends Service {
             smsManager = SmsManager.getDefault();
         }
 
-        smsManager.sendTextMessage(
-                phoneNumber,
-                null,
-                text,
-                null,
-                null
-        );
+        smsManager.sendTextMessage(phoneNumber, null, text, null, null);
     }
 
     @Nullable

@@ -53,6 +53,11 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
+        <service
+            android:name=".RxForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="location"/>
+
         <!-- ===== MAIN ===== -->
         <activity
             android:name=".MainActivity"
