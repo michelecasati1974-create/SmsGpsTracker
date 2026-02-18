@@ -11,6 +11,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.android.gms.maps.*
 import com.google.android.gms.maps.model.*
 import java.net.URL
+import android.widget.Button
+
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -119,6 +121,30 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             if (isChecked) enableCycloOverlay()
             else disableCycloOverlay()
         }
+
+        val btnExport = findViewById<Button>(R.id.btnExport)
+
+        btnExport.setOnClickListener {
+
+            if (trackPoints.isNotEmpty()) {
+
+                val serviceIntent =
+                    Intent(this, RxExportForegroundService::class.java)
+
+                serviceIntent.putParcelableArrayListExtra(
+                    "TRACK_POINTS",
+                    ArrayList(trackPoints)
+                )
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            }
+        }
+
+
     }
 
     override fun onDestroy() {
