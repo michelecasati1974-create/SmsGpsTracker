@@ -20,6 +20,10 @@ import java.util.*
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.os.SystemClock
+import java.io.File
+import java.io.FileOutputStream
+import android.net.Uri
+
 
 class RxExportForegroundService : Service() {
 
@@ -210,28 +214,55 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
     private fun saveBitmap(bitmap: Bitmap) {
 
-        val filename =
-            "tracking_${System.currentTimeMillis()}.jpg"
+        val filename = "tracking_${System.currentTimeMillis()}.jpg"
 
-        val resolver = contentResolver
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10+
 
-        val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(
-                MediaStore.Images.Media.RELATIVE_PATH,
-                Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
+            val resolver = contentResolver
+
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(
+                    MediaStore.Images.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
+                )
+            }
+
+            val uri = resolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues
             )
-        }
 
-        val uri = resolver.insert(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues
-        )
+            uri?.let {
+                resolver.openOutputStream(it)?.use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                }
+            }
 
-        uri?.let {
-            resolver.openOutputStream(it)?.use { out ->
+        } else {
+            // Android 9 e inferiori (Android 7 incluso)
+
+            val picturesDir = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_PICTURES
+            )
+
+            val appDir = File(picturesDir, "SmsGpsTracker")
+            if (!appDir.exists()) {
+                appDir.mkdirs()
+            }
+
+            val file = File(appDir, filename)
+
+            FileOutputStream(file).use { out ->
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
             }
+
+            // Notifica al sistema la nuova immagine
+            val scanIntent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+            scanIntent.data = Uri.fromFile(file)
+            sendBroadcast(scanIntent)
         }
     }
 
