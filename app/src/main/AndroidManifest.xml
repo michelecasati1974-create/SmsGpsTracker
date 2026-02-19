@@ -48,7 +48,7 @@
         <!-- ===== GOOGLE MAPS ===== -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyBZioq1zDU58T4hb1vPrHkwjG5p1q5PyL8" />
+            android:value="AIzaSyC3bvvXeEHuQIoTb5d0AT8zh4zw7dAPfX4" />
 
         <!-- ===== FOREGROUND SERVICE TX ===== -->
         <service
