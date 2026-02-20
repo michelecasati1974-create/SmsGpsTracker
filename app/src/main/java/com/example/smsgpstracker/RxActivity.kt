@@ -31,6 +31,10 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private var cycloOverlay: TileOverlay? = null
     private var isCycloEnabled = false
 
+    private lateinit var prefs: SharedPreferences
+    private var selectedMapProvider = "GOOGLE"   // GOOGLE o MAPTILER
+
+
     // =====================================================
     // RECEIVER SMS
     // =====================================================
@@ -59,7 +63,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
                         if (isCycloEnabled) {
                             cycloOverlay?.remove()
-                            enableCycloOverlay()
+                            enableMapTilerOverlay()
                         }
                     }
                 }
@@ -102,6 +106,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx)
+        prefs = getSharedPreferences("map_settings", MODE_PRIVATE)
+        selectedMapProvider = prefs.getString("provider", "GOOGLE")!!
 
         txtStatus = findViewById(R.id.txtStatus)
         txtCount = findViewById(R.id.txtCount)
@@ -119,8 +125,17 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         receiverRegistered = true
 
         val switchMapType = findViewById<Switch>(R.id.switchMapType)
+
+        switchMapType.isChecked = selectedMapProvider == "MAPTILER"
+
         switchMapType.setOnCheckedChangeListener { _, isChecked ->
-            if (isChecked) enableCycloOverlay() else disableCycloOverlay()
+
+            selectedMapProvider = if (isChecked) "MAPTILER" else "GOOGLE"
+
+            prefs.edit().putString("provider", selectedMapProvider).apply()
+
+            if (isChecked) enableMapTilerOverlay()
+            else disableMapTilerOverlay()
         }
 
         val btnExport = findViewById<Button>(R.id.btnExport)
@@ -150,7 +165,12 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         // Se ci sono punti già ricevuti, ridisegnali
         if (trackPoints.isNotEmpty()) drawAllPoints()
         // Ricarica overlay CyclOSM se abilitato
-        if (isCycloEnabled) enableCycloOverlay()
+        if (selectedMapProvider == "MAPTILER") {
+            enableMapTilerOverlay()
+        }
+        if (selectedMapProvider == "MAPTILER") {
+            enableMapTilerOverlay()
+        }
     }
 
     // =====================================================
@@ -184,26 +204,39 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtLast.text = "Ultima:\n${last.latitude}, ${last.longitude}"
     }
 
+
+
     // =====================================================
     // CYCLOSM
     // =====================================================
-    private fun enableCycloOverlay() {
-        if (!mapReady || cycloOverlay != null) return
+    private fun enableMapTilerOverlay() {
+
+        if (!mapReady) return
+
+        disableMapTilerOverlay()
+
+        val apiKey = "evudqvofcpXRhzwIFeFO"
 
         val tileProvider = object : UrlTileProvider(256, 256) {
             override fun getTileUrl(x: Int, y: Int, zoom: Int): URL? {
                 return try {
-                    URL("https://a.tile-cyclosm.openstreetmap.fr/cyclosm/$zoom/$x/$y.png")
+                    URL("https://api.maptiler.com/maps/topo-v2/256/$zoom/$x/$y.png?key=$apiKey")
                 } catch (e: Exception) {
                     null
                 }
             }
         }
-        cycloOverlay = googleMap.addTileOverlay(TileOverlayOptions().tileProvider(tileProvider).fadeIn(false))
+
+        cycloOverlay = googleMap.addTileOverlay(
+            TileOverlayOptions()
+                .tileProvider(tileProvider)
+                .fadeIn(false)
+        )
+
         isCycloEnabled = true
     }
 
-    private fun disableCycloOverlay() {
+    private fun disableMapTilerOverlay() {
         cycloOverlay?.remove()
         cycloOverlay = null
         isCycloEnabled = false
@@ -221,9 +254,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
 
         // Ricarica overlay CyclOSM se era attivo
-        if (isCycloEnabled) {
-            cycloOverlay?.remove()
-            enableCycloOverlay()
+        if (selectedMapProvider == "MAPTILER") {
+            enableMapTilerOverlay()
         }
 
         // Centro iniziale (Italia)

@@ -50,6 +50,9 @@ class RxExportForegroundService : Service() {
         val points =
             intent?.getParcelableArrayListExtra<LatLng>("TRACK_POINTS")
 
+        val mapProvider =
+            intent?.getStringExtra("MAP_PROVIDER") ?: "GOOGLE"
+
         if (points.isNullOrEmpty()) {
             showErrorNotification("Errore: nessun punto ricevuto")
             stopSelf()
@@ -60,7 +63,10 @@ class RxExportForegroundService : Service() {
 
             try {
 
-                val bitmap = downloadStaticMap(points)
+                val bitmap = if (mapProvider == "MAPTILER")
+                    downloadMapTilerStatic(points)
+                else
+                    downloadGoogleStatic(points)
 
                 if (bitmap != null) {
 
@@ -119,7 +125,7 @@ class RxExportForegroundService : Service() {
     // GOOGLE STATIC MAP
     // ===============================
 
-    private fun downloadStaticMap(points: List<LatLng>): Bitmap? {
+    private fun downloadGoogleStatic(points: List<LatLng>): Bitmap? {
 
         val path = points.joinToString("|") {
             "${it.latitude},${it.longitude}"
@@ -139,16 +145,38 @@ class RxExportForegroundService : Service() {
                     "&markers=color:red|label:E|${end.latitude},${end.longitude}" +
                     "&key=$apiKey"
 
-        val url = URL(urlString)
-        val connection = url.openConnection() as HttpURLConnection
+        val connection = URL(urlString).openConnection() as HttpURLConnection
         connection.connect()
 
-        if (connection.responseCode != 200) {
-            return null
+        if (connection.responseCode != 200) return null
+
+        return BitmapFactory.decodeStream(connection.inputStream)
+    }
+
+    private fun downloadMapTilerStatic(points: List<LatLng>): Bitmap? {
+
+        val apiKey = "evudqvofcpXRhzwIFeFO"
+
+        val start = points.first()
+        val end = points.last()
+
+        val path = points.joinToString("|") {
+            "${it.longitude},${it.latitude}"
         }
 
-        val input: InputStream = connection.inputStream
-        return BitmapFactory.decodeStream(input)
+        val urlString =
+            "https://api.maptiler.com/maps/topo-v2/static/" +
+                    "path-5+000000($path)," +
+                    "pin-s+00ff00(${start.longitude},${start.latitude})," +
+                    "pin-s+ff0000(${end.longitude},${end.latitude})/" +
+                    "auto/1080x1920.png?key=$apiKey"
+
+        val connection = URL(urlString).openConnection() as HttpURLConnection
+        connection.connect()
+
+        if (connection.responseCode != 200) return null
+
+        return BitmapFactory.decodeStream(connection.inputStream)
     }
 
 

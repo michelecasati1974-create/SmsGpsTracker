@@ -56,6 +56,11 @@ class RxForegroundService : Service() {
 
                     exportIntent.putParcelableArrayListExtra("TRACK_POINTS", latLngList)
 
+                    val prefs = getSharedPreferences("map_settings", Context.MODE_PRIVATE)
+                    val provider = prefs.getString("provider", "GOOGLE")
+
+                    exportIntent.putExtra("MAP_PROVIDER", provider)
+
                     // Avvia servizio foreground per generare immagine
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(exportIntent)
