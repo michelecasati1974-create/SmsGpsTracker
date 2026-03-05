@@ -63,7 +63,7 @@ public class TxForegroundService extends Service {
     private boolean vibrationTriggered = false;
 
 
-    private Handler handler = new Handler(Looper.getMainLooper());
+    private Handler handler = new Handler(Looper.getMainLooper(), null);
     private Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private Runnable uiRunnable;
@@ -436,8 +436,14 @@ public class TxForegroundService extends Service {
     private void startUiTimer() {
 
         uiRunnable = new Runnable() {
+
             @Override
             public void run() {
+
+                if (!isRunning) {
+                    sendUpdate(TxStatus.IDLE, 0, smsSent);
+                    return;
+                }
 
                 if (!isRunning) return;
 
@@ -536,13 +542,18 @@ public class TxForegroundService extends Service {
         isRunning = false;
 
         handler.removeCallbacksAndMessages(null);
-        uiHandler.removeCallbacksAndMessages(null);
         rxMonitorHandler.removeCallbacksAndMessages(null);
+
+        // 👇 STOP SOLO IL TIMER UI SPECIFICO
+        if (uiRunnable != null) {
+            uiHandler.removeCallbacks(uiRunnable);
+        }
 
         if (continuousLocationCallback != null) {
             fusedClient.removeLocationUpdates(continuousLocationCallback);
         }
 
+        sendUpdate(TxStatus.IDLE, 0, smsSent);
         stopForeground(true);
 
         sendUpdate(TxStatus.IDLE, 0, smsSent);
