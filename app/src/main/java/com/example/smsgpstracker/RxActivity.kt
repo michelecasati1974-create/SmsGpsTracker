@@ -358,7 +358,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             // MapTiler attivo → aspettiamo caricamento tile
             Handler(Looper.getMainLooper()).postDelayed({
                 takeSnapshot()
-            }, 1800)   // 1.8 secondi è un valore sicuro
+            }, 10000)   // 10 secondi è un valore sicuro
         } else {
             takeSnapshot()
         }
