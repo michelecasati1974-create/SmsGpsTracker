@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:src="@drawable/inferno_bg"
+        android:alpha="0.20" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#EEFFFFFF"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Parametri Comunicazione"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:layout_marginBottom="12dp" />
+
+                <EditText
+                    android:id="@+id/edtPhoneRx"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Numero telefono RX"
+                    android:inputType="phone"
+                    android:minHeight="48dp"
+                    android:padding="12dp"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#EEFFFFFF"
+                android:padding="16dp"
+                android:layout_marginTop="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Soglie Sistema"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:layout_marginBottom="12dp" />
+
+                <EditText
+                    android:id="@+id/edtNoSignalTc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Tempo controllo assenza rete Tc (sec)"
+                    android:inputType="number"
+                    android:minHeight="48dp"
+                    android:padding="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Range ammesso: 1 a 300 sec"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="4dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Tempo massimo di assenza segnale rete prima dell'attivazione della vibrazione."
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp"/>
+
+                <EditText
+                    android:id="@+id/edtVibrationTs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Durata vibrazione Ts (sec)"
+                    android:inputType="number"
+                    android:minHeight="48dp"
+                    android:padding="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Range ammesso: 1 a 60 sec"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="4dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Durata della vibrazione dello smartphone in caso di assenza rete."
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp"/>
+
+                <EditText
+                    android:id="@+id/edtSignalThreshold"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Soglia segnale rete (dBm)"
+                    android:inputType="numberSigned"
+                    android:minHeight="48dp"
+                    android:padding="12dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Valore minimo di potenza del segnale cellulare accettabile durante il tracking."
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Range ammesso: -110 a -50"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp" />
+
+                <EditText
+                    android:id="@+id/edtGpsThreshold"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Soglia accuratezza GPS (metri)"
+                    android:inputType="number"
+                    android:minHeight="48dp"
+                    android:padding="12dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Accuratezza massima GPS consentita per considerare valida una posizione."
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Range ammesso: 1 a 100"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp" />
+
+                <EditText
+                    android:id="@+id/edtTimeoutFactor"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Fattore moltiplicativo timeout"
+                    android:inputType="numberDecimal"
+                    android:minHeight="48dp"
+                    android:padding="12dp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Moltiplica l'intervallo SMS per determinare il timeout di verifica dello stato RX."
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="12dp"/>
+
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnSaveSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="SALVA"
+                android:layout_marginTop="24dp" />
+
+            <Button
+                android:id="@+id/btnCancelSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ANNULLA" />
+
+        </LinearLayout>
+
+    </ScrollView>
+
+</FrameLayout>

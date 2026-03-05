@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- IMMAGINE SFONDO -->
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:src="@drawable/inferno_bg"
+        android:alpha="0.25" />
+
+    <!-- CONTENUTO SCROLLABILE -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <!-- FRASE DANTESCA -->
+            <TextView
+                android:id="@+id/txtQuote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Nel mezzo del cammin di nostra vita&#10;mi ritrovai per una selva oscura,&#10;ché la diritta via era smarrita."
+                android:textStyle="italic"
+                android:textSize="16sp"
+                android:fontFamily="serif"
+                android:textColor="#000000"
+                android:lineSpacingExtra="6dp"
+                android:layout_marginBottom="40dp"/>
+
+            <!-- TITOLO -->
+            <TextView
+                android:id="@+id/titleText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SmsGpsTracker"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="40dp"/>
+
+            <!-- PULSANTI -->
+            <Button
+                android:id="@+id/btnTx"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="TRASMETTITORE (TX)"
+                android:layout_marginBottom="16dp"/>
+
+            <Button
+                android:id="@+id/btnRx"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="RICEVENTE (RX)"/>
+
+        </LinearLayout>
+
+    </ScrollView>
+
+</FrameLayout>

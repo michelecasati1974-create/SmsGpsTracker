@@ -1,0 +1,322 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- IMMAGINE SFONDO -->
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:src="@drawable/inferno_bg"
+        android:alpha="0.20" />
+
+    <!-- CONTENUTO SCROLLABILE -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- ============================= -->
+            <!-- PARAMETRI TX -->
+            <!-- ============================= -->
+
+            <TextView
+                android:text="Parametri Trasmissione"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:layout_marginBottom="8dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <Switch
+                android:id="@+id/switchContinuousMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CICLO CONTINUO"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/edtMaxSms"
+                android:hint="Numero massimo SMS"
+                android:inputType="number"
+                android:minHeight="48dp"
+                android:padding="12dp"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <EditText
+                android:id="@+id/edtInterval"
+                android:hint="Intervallo (minuti)"
+                android:inputType="number"
+                android:minHeight="48dp"
+                android:padding="12dp"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <!-- ============================= -->
+            <!-- CARD STATUS -->
+            <!-- ============================= -->
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#EEFFFFFF"
+                android:padding="12dp"
+                android:layout_marginTop="16dp"
+                android:elevation="2dp">
+
+                <TextView
+                    android:text="Stato Sistema"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <!-- SEGNALE GSM -->
+
+                <TextView
+                    android:text="Segnale rete"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="4dp">
+
+                    <View android:id="@+id/s1"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/s2"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/s3"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/s4"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/s5"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:background="@drawable/led_neutral"/>
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtSignalInfo"
+                    android:text="-- dBm"
+                    android:textSize="11sp"
+                    android:layout_marginTop="2dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <Switch
+                    android:id="@+id/switchNoSignalAlert"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Allarme assenza rete"
+                    android:layout_marginTop="8dp"/>
+
+                <!-- GPS -->
+
+                <TextView
+                    android:text="Qualità GPS"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="12dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="4dp">
+
+                    <View android:id="@+id/g1"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/g2"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/g3"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/g4"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/led_neutral"/>
+
+                    <View android:id="@+id/g5"
+                        android:layout_width="16dp"
+                        android:layout_height="24dp"
+                        android:background="@drawable/led_neutral"/>
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/switchFastMonitor"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="MONITORAGGIO RAPIDO (0.5s)"
+                    android:textSize="14sp"
+                    android:checked="false"
+                    android:layout_marginTop="8dp"/>
+
+                <TextView
+                    android:id="@+id/txtGpsInfo"
+                    android:text="--"
+                    android:textSize="11sp"
+                    android:layout_marginTop="2dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+            </LinearLayout>
+
+            <!-- TX -->
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="12dp">
+
+                <ImageView
+                    android:id="@+id/imgLedTx"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:background="@drawable/led_neutral"/>
+
+                <TextView
+                    android:layout_marginStart="8dp"
+                    android:text="Stato ciclo TX"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <!-- RX -->
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="6dp">
+
+                <ImageView
+                    android:id="@+id/imgLedRx"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:background="@drawable/led_neutral"/>
+
+                <TextView
+                    android:layout_marginStart="8dp"
+                    android:text="Stato RX remoto"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#EEFFFFFF"
+                android:padding="12dp"
+                android:layout_marginTop="16dp"
+                android:elevation="2dp">
+
+                <TextView
+                    android:text="Ciclo in corso"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <TextView
+                    android:id="@+id/txtTimer"
+                    android:text="00:00"
+                    android:textSize="20sp"
+                    android:textStyle="bold"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <TextView
+                    android:id="@+id/txtSmsCounter"
+                    android:text="SMS: 0/0"
+                    android:textSize="20sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="8dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <!-- PULSANTI -->
+
+            <Button
+                android:id="@+id/btnStartTx"
+                android:text="START"
+                android:layout_marginTop="20dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <Button
+                android:id="@+id/btnStopTx"
+                android:text="STOP"
+                android:enabled="false"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <Button
+                android:id="@+id/btnForcePosition"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="INVIA POSIZIONE ORA"
+                android:enabled="false"
+                android:layout_marginTop="8dp"/>
+
+            <Button
+                android:id="@+id/btnSettings"
+                android:text="SETTINGS"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+        </LinearLayout>
+
+    </ScrollView>
+
+</FrameLayout>
