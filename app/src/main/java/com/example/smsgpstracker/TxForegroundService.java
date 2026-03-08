@@ -20,10 +20,15 @@ import android.telephony.SignalStrength;
 import android.telephony.TelephonyManager;
 import java.util.List;
 import android.telephony.CellSignalStrength;
+import java.util.ArrayList;
+import com.google.android.gms.maps.model.LatLng;
+
 
 
 
 public class TxForegroundService extends Service {
+
+
 
     public static final String ACTION_START = "ACTION_START";
 
@@ -38,6 +43,8 @@ public class TxForegroundService extends Service {
             "com.example.smsgpstracker.SET_MONITOR_INTERVAL";
 
 
+
+    private GpsTrackBuffer gpsTrackBuffer;
 
     private TelephonyManager telephonyManager;
     private PhoneStateListener signalListener;
@@ -65,6 +72,8 @@ public class TxForegroundService extends Service {
 
     private Handler handler = new Handler(Looper.getMainLooper(), null);
     private Handler uiHandler = new Handler(Looper.getMainLooper());
+    private HighFrequencyTracker highFrequencyTracker = new HighFrequencyTracker();
+    private SequenceManager sequenceManager = new SequenceManager();
 
     private Runnable uiRunnable;
 
@@ -89,11 +98,17 @@ public class TxForegroundService extends Service {
     private long rxTimeoutMs;
     private Handler rxMonitorHandler = new Handler(Looper.getMainLooper());
 
+
+
+
+
     public enum TxStatus {
         IDLE,
         WAITING,
         TRACKING
     }
+
+
 
     private void startContinuousGps() {
 
@@ -119,13 +134,57 @@ public class TxForegroundService extends Service {
                 Location loc = result.getLastLocation();
                 if (loc == null) return;
 
+                // filtro alta frequenza
+                if (!highFrequencyTracker.shouldAccept(loc)) {
+                    return;
+                }
+
                 lastLocation = loc;
 
                 gpsFixValid = loc.hasAccuracy() && loc.getAccuracy() <= 100;
 
+                double lat = loc.getLatitude();
+                double lon = loc.getLongitude();
+                float acc = loc.getAccuracy();
+                long ts = loc.getTime();
+
+                GpsPoint p = new GpsPoint(ts, lat, lon, acc);
+
+                gpsTrackBuffer.addPoint(p);
+
+                List<GpsPoint> rawPoints = gpsTrackBuffer.getPoints();
+
+                int size = rawPoints.size();
+
+                Log.d("BUFFER_TEST", "size=" + size);
+
+                if (size >= 25) {
+
+                    List<LatLng> points = new ArrayList<>();
+
+                    for (GpsPoint gp : rawPoints) {
+                        points.add(new LatLng(gp.getLat(), gp.getLon()));
+                    }
+
+                    int seq = sequenceManager.next();
+
+                    String sms = SmsTrackCompressor.INSTANCE.compress(points, seq);
+                    Log.d("SMS_TRACK", "seq=" + seq);
+                    Log.d("SMS_TRACK", "payload=" + sms);
+                    Log.d("SMS_TRACK", "length=" + sms.length());
+
+                    // QUI in futuro invieremo davvero l'SMS
+                    // sendSms(sms);
+
+                    // svuota il buffer
+                    gpsTrackBuffer.clear();
+
+                    Log.d("SMS_TRACK", "buffer cleared");
+                }
+
                 sendGpsRealtimeUpdate(
-                        loc.getLatitude(),
-                        loc.getLongitude(),
+                        lat,
+                        lon,
                         loc.getAccuracy()
                 );
             }
@@ -296,6 +355,7 @@ public class TxForegroundService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        gpsTrackBuffer = new GpsTrackBuffer(this);
         fusedClient = LocationServices.getFusedLocationProviderClient(this);
         createNotificationChannel();
         startSignalMonitor();     // listener sempre attivo

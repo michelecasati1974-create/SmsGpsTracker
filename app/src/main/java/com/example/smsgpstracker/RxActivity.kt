@@ -84,6 +84,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         trackPoints.add(point)
                         manualPoints.add(point)
 
+                        Log.d("BUFFER_TEST", "points loaded = ${trackPoints.size}")
                         Log.d("RX_DEBUG", "Manual point salvato: $lat,$lon")
 
                         if (mapReady) drawAllPoints()
@@ -245,9 +246,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         if (selectedMapProvider == "MAPTILER") {
             enableMapTilerOverlay()
         }
-        if (selectedMapProvider == "MAPTILER") {
-            enableMapTilerOverlay()
-        }
     }
 
     // =====================================================
@@ -354,17 +352,17 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun takeSnapshotSafely() {
 
-        if (isCycloEnabled) {
-            // MapTiler attivo → aspettiamo caricamento tile
-            Handler(Looper.getMainLooper()).postDelayed({
-                takeSnapshot()
-            }, 10000)   // 10 secondi è un valore sicuro
-        } else {
+        Log.d("SNAPSHOT_DEBUG", "takeSnapshotSafely start")
+
+        Handler(Looper.getMainLooper()).postDelayed({
+
             takeSnapshot()
-        }
+
+        }, 1500)
     }
 
     private fun generateFinalSnapshot() {
+
 
         if (!mapReady || trackPoints.isEmpty()) return
 
@@ -372,20 +370,24 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         trackPoints.forEach { builder.include(it) }
         val bounds = builder.build()
 
-
         googleMap.animateCamera(
-            CameraUpdateFactory.newLatLngBounds(bounds, 150)
+            CameraUpdateFactory.newLatLngBounds(bounds, 150),
+            1200,
+            object : GoogleMap.CancelableCallback {
+
+                override fun onFinish() {
+
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        takeSnapshotSafely()
+                    }, 1200)
+
+                }
+
+                override fun onCancel() {
+                    takeSnapshotSafely()
+                }
+            }
         )
-
-        // Aspetta che mappa sia completamente renderizzata
-        googleMap.setOnMapLoadedCallback {
-
-            // piccolo delay di sicurezza per overlay tile
-            Handler(Looper.getMainLooper()).postDelayed({
-                takeSnapshotSafely()
-            }, 800)   // 800 ms è robusto anche su rete lenta
-        }
-
     }
 
     private fun takeSnapshot() {
@@ -393,6 +395,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         googleMap.snapshot { originalBitmap ->
 
             if (originalBitmap == null) return@snapshot
+            if (trackPoints.isEmpty()) return@snapshot
 
             val bitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(bitmap)
@@ -451,26 +454,58 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     }
 
                     index == 0 -> {
+
                         paintCircle.color = Color.GREEN
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 18f, paintCircle)
-                        canvas.drawText("S", point.x.toFloat()-8f, point.y.toFloat()+8f, paintText)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+
+                        paintText.textSize = 30f
+                        paintText.color = Color.WHITE
+                        paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+
+                        canvas.drawText(
+                            "S",
+                            point.x.toFloat() - 10f,
+                            point.y.toFloat() + 10f,
+                            paintText
+                        )
+
+                        paintText.clearShadowLayer()
                     }
 
                     index == trackPoints.lastIndex -> {
+
                         paintCircle.color = Color.RED
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 18f, paintCircle)
-                        canvas.drawText("E", point.x.toFloat()-8f, point.y.toFloat()+8f, paintText)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+
+                        paintText.textSize = 30f
+                        paintText.color = Color.WHITE
+                        paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+
+                        canvas.drawText(
+                            "E",
+                            point.x.toFloat() - 10f,
+                            point.y.toFloat() + 10f,
+                            paintText
+                        )
+
+                        paintText.clearShadowLayer()
                     }
 
                     else -> {
+
                         paintCircle.color = Color.BLACK
                         canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 12f, paintCircle)
-                        canvas.drawText(
-                            "P$index",
-                            point.x.toFloat()+10f,
-                            point.y.toFloat(),
-                            paintText
-                        )
+
+                        // Mostra etichetta solo ogni 5 punti
+                        if (index % 5 == 0) {
+
+                            canvas.drawText(
+                                "P$index",
+                                point.x.toFloat() + 10f,
+                                point.y.toFloat(),
+                                paintText
+                            )
+                        }
                     }
                 }
             }
@@ -526,67 +561,45 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
     }
     private fun saveFinalBitmap(bitmap: Bitmap) {
 
-        val filename = "Trekking.jpg"
+        try {
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Log.d("SNAPSHOT_DEBUG", "saving bitmap")
 
-            val resolver = contentResolver
-
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(
-                    MediaStore.Images.Media.RELATIVE_PATH,
-                    Environment.DIRECTORY_PICTURES + "/SmsGpsTracker"
-                )
-            }
-
-            // Cancella eventuale file precedente
-            resolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                arrayOf(MediaStore.Images.Media._ID),
-                "${MediaStore.Images.Media.DISPLAY_NAME}=?",
-                arrayOf(filename),
-                null
-            )?.use { cursor ->
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(0)
-                    val uri = ContentUris.withAppendedId(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        id
-                    )
-                    resolver.delete(uri, null, null)
-                }
-            }
-
-            val uri = resolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
+            // riduce uso memoria (fondamentale per Android 7)
+            val scaled = Bitmap.createScaledBitmap(
+                bitmap,
+                bitmap.width / 2,
+                bitmap.height / 2,
+                true
             )
 
-            uri?.let {
-                resolver.openOutputStream(it)?.use { out ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-                }
+            val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+
+            if (dir == null) {
+                Log.e("SNAPSHOT_DEBUG", "pictures dir null")
+                return
             }
 
-        } else {
-            val picturesDir = Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_PICTURES
+            val file = File(
+                dir,
+                "track_${System.currentTimeMillis()}.jpg"
             )
 
-            val appDir = File(picturesDir, "SmsGpsTracker")
-            if (!appDir.exists()) appDir.mkdirs()
+            val out = FileOutputStream(file)
 
-            val file = File(appDir, filename)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
 
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
+            out.flush()
+            out.close()
+
+            Log.d("SNAPSHOT_DEBUG", "bitmap saved: ${file.absolutePath}")
+
+        } catch (e: Exception) {
+
+            Log.e("SNAPSHOT_DEBUG", "save error", e)
+
         }
     }
-
-
 }
 
 

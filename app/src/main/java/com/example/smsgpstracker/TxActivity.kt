@@ -174,6 +174,8 @@ class TxActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tx)
 
+
+
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
 
         edtMaxSms = findViewById(R.id.edtMaxSms)
@@ -433,4 +435,5 @@ class TxActivity : AppCompatActivity() {
         // LED RX torna UNKNOWN (giallo)
         updateRxLed(RxRemoteStatus.UNKNOWN)
     }
+
 }

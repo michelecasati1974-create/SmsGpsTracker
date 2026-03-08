@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
 
         // 🔐 Permessi runtime
         checkAndRequestPermissions()
-        Manifest.permission.READ_PHONE_STATE
+
 
         // 📡 GPS helper
         GpsHelper.init(this)
@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         val permissions = mutableListOf(
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_SMS,
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
