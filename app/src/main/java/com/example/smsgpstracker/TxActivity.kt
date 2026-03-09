@@ -9,6 +9,7 @@ import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import android.util.Log
+import androidx.core.content.ContextCompat
 
 class TxActivity : AppCompatActivity() {
 
@@ -43,6 +44,11 @@ class TxActivity : AppCompatActivity() {
     private var monitorIntervalMs = 5000L
     private val normalInterval = 5000L
     private val fastInterval = 500L
+
+    private lateinit var switchMultiGpsSms: Switch
+    private var multiGpsMode = false
+
+
 
     private var currentStatus = TxStatus.IDLE
     private var rxStatus = RxRemoteStatus.UNKNOWN
@@ -174,10 +180,39 @@ class TxActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tx)
 
+        switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
+
+        switchMultiGpsSms.setOnCheckedChangeListener { _, isChecked ->
+
+            multiGpsMode = isChecked
+
+            if (isChecked) {
+
+                Log.d("TX_MODE", "MULTI GPS SMS MODE")
+
+                // disabilita modalità classiche
+                switchContinuousMode.isEnabled = false
+                edtMaxSms.isEnabled = false
+                edtInterval.isEnabled = false
+
+            } else {
+
+                Log.d("TX_MODE", "STANDARD SMS MODE")
+
+                // riabilita modalità classiche
+                switchContinuousMode.isEnabled = true
+                edtInterval.isEnabled = true
+
+                if (!switchContinuousMode.isChecked) {
+                    edtMaxSms.isEnabled = true
+                }
+            }
+        }
 
 
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-
+        switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
+        switchContinuousMode = findViewById(R.id.switchContinuousMode)
         edtMaxSms = findViewById(R.id.edtMaxSms)
         edtInterval = findViewById(R.id.edtInterval)
         txtTimer = findViewById(R.id.txtTimer)
@@ -216,7 +251,21 @@ class TxActivity : AppCompatActivity() {
         updateRxLed(RxRemoteStatus.UNKNOWN)
         updateTxLed(TxStatus.IDLE)
 
-        btnStartTx.setOnClickListener { startTxService() }
+        btnStartTx.setOnClickListener {
+
+            if (multiGpsMode) {
+
+                Log.d("TX_MODE", "START MULTI GPS TRACKING")
+
+                startMultiGpsTracking()
+
+            } else {
+
+                Log.d("TX_MODE", "START STANDARD TX")
+
+                startTxService()
+            }
+        }
         btnStopTx.setOnClickListener { stopTxService() }
         btnForcePosition = findViewById(R.id.btnForcePosition)
 
@@ -254,6 +303,13 @@ class TxActivity : AppCompatActivity() {
         switchContinuousMode = findViewById(R.id.switchContinuousMode)
 
         switchContinuousMode.setOnCheckedChangeListener { _, isChecked ->
+            if (multiGpsMode) return@setOnCheckedChangeListener
+
+            if (isChecked) {
+                edtMaxSms.isEnabled = false
+            } else {
+                edtMaxSms.isEnabled = true
+            }
 
             edtMaxSms.isEnabled = !isChecked
             edtMaxSms.alpha = if (isChecked) 0.4f else 1f
@@ -261,6 +317,15 @@ class TxActivity : AppCompatActivity() {
 
 
 
+    }
+
+    private fun startMultiGpsTracking() {
+
+        val intent = Intent(this, TxForegroundService::class.java)
+
+        intent.putExtra("MODE", "MULTI_GPS_SMS")
+
+        ContextCompat.startForegroundService(this, intent)
     }
 
     // =====================================================

@@ -56,6 +56,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private val manualPoints = mutableListOf<LatLng>()
 
+    private val rxAssembler = RxTrackAssembler()
+
 
     // =====================================================
     // RECEIVER SMS
@@ -63,6 +65,38 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private val smsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val msg = intent?.getStringExtra("SMS_BODY") ?: return
+
+            // =====================================================
+            // TRACK SMS (protocollo T#)
+            // =====================================================
+            if (msg.startsWith("T#")) {
+
+                try {
+
+                    val assembler = RxTrackAssembler()
+
+                    val points = rxAssembler.processSms(msg)
+
+                    if (points != null) {
+
+                        for (p in points) {
+
+                            val latLng = LatLng(p.first, p.second)
+
+                            trackPoints.add(latLng)
+                        }
+
+                        Log.d("RX_TRACK", "SMS track ricevuto punti=${points.size}")
+
+                        if (mapReady) drawAllPoints()
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("RX_TRACK", "Errore decoding SMS track", e)
+                }
+
+                return
+            }
 
             Log.d("RX_DEBUG", "SMS RAW: [$msg]")
 
@@ -236,13 +270,37 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     override fun onMapReady(map: GoogleMap) {
+
         googleMap = map
         mapReady = true
+
         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
 
-        // Se ci sono punti già ricevuti, ridisegnali
-        if (trackPoints.isNotEmpty()) drawAllPoints()
-        // Ricarica overlay CyclOSM se abilitato
+        // =====================================
+        // IMPORTA PUNTI DAL REPOSITORY SMS
+        // =====================================
+        if (TrackRepository.points.isNotEmpty()) {
+
+            trackPoints.clear()
+
+            for (p in TrackRepository.points) {
+
+                val latLng = LatLng(p.first, p.second)
+
+                trackPoints.add(latLng)
+            }
+        }
+
+        // =====================================
+        // DISEGNA TRACCIA
+        // =====================================
+        if (trackPoints.isNotEmpty()) {
+            drawAllPoints()
+        }
+
+        // =====================================
+        // OVERLAY MAPTILER
+        // =====================================
         if (selectedMapProvider == "MAPTILER") {
             enableMapTilerOverlay()
         }

@@ -14,6 +14,17 @@ class SequenceManager {
         return currentSequence
     }
 
+    // 👇 INSERISCI QUESTO METODO QUI
+    fun peekNext(): Int {
+        var nextSeq = currentSequence + 1
+
+        if (nextSeq > 9999) {
+            nextSeq = 1
+        }
+
+        return nextSeq
+    }
+
     fun reset() {
         currentSequence = 0
     }
@@ -22,3 +33,5 @@ class SequenceManager {
         return currentSequence
     }
 }
+
+

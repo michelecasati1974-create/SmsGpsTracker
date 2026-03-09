@@ -35,6 +35,14 @@
                 android:layout_height="wrap_content"/>
 
             <Switch
+                android:id="@+id/switchMultiGpsSms"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Multi GPS per SMS"
+                android:checked="false"
+                android:layout_marginTop="12dp"/>
+
+            <Switch
                 android:id="@+id/switchContinuousMode"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

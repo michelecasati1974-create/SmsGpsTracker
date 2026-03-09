@@ -31,6 +31,11 @@ class SmsTrackReceiver : BroadcastReceiver() {
             if (!messageBody.startsWith("T#")) continue
 
             val points = assembler.processSms(messageBody)
+            points?.let {
+
+                TrackRepository.addPoints(it)
+
+            }
 
             if (points != null) {
 

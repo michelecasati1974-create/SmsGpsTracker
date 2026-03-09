@@ -22,6 +22,9 @@ import java.util.List;
 import android.telephony.CellSignalStrength;
 import java.util.ArrayList;
 import com.google.android.gms.maps.model.LatLng;
+import kotlin.Pair;
+import com.example.smsgpstracker.tx.PolylineCodec;
+import android.content.Context;
 
 
 
@@ -68,6 +71,7 @@ public class TxForegroundService extends Service {
     private boolean noSignalAlertEnabled = false;
     private long noSignalStartTime = 0;
     private boolean vibrationTriggered = false;
+    private static final int NOTIFICATION_ID = 1;
 
 
     private Handler handler = new Handler(Looper.getMainLooper(), null);
@@ -88,15 +92,102 @@ public class TxForegroundService extends Service {
     private Handler signalHandler = new Handler(Looper.getMainLooper());
     private Runnable signalPollRunnable;
 
+    private long lastMovementTime = 0;
+
+    private boolean stopMode = false;
+
+
+
 
 
     private boolean gpsFixValid = false;
 
     private boolean continuousMode = false;
 
+    private static final float MOVEMENT_DISTANCE_METERS = 5f;
+    private static final long STOP_TIMEOUT_MS = 120000; // 2 minuti
+
 
     private long rxTimeoutMs;
     private Handler rxMonitorHandler = new Handler(Looper.getMainLooper());
+
+    private float distanceMeters(Location a, Location b) {
+
+        float[] result = new float[1];
+
+        Location.distanceBetween(
+                a.getLatitude(),
+                a.getLongitude(),
+                b.getLatitude(),
+                b.getLongitude(),
+                result
+        );
+
+        return result[0];
+    }
+
+    private boolean shouldRecordPoint(Location loc) {
+
+        if (lastLocation == null) {
+
+            lastLocation = loc;
+            lastMovementTime = System.currentTimeMillis();
+
+            return true;
+        }
+
+        float dist = distanceMeters(lastLocation, loc);
+
+        long now = System.currentTimeMillis();
+
+        if (dist >= MOVEMENT_DISTANCE_METERS) {
+
+            lastLocation = loc;
+            lastMovementTime = now;
+
+            if (stopMode) {
+                Log.d("SMART_STOP", "movement detected → exit STOP mode");
+            }
+
+            stopMode = false;
+
+            return true;
+        }
+
+        long stoppedTime = now - lastMovementTime;
+
+        if (stoppedTime > STOP_TIMEOUT_MS) {
+
+            if (!stopMode) {
+                Log.d("SMART_STOP", "enter STOP mode");
+            }
+
+            stopMode = true;
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+
+        double R = 6371000; // raggio terra metri
+
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+
+        double a =
+                Math.sin(dLat/2) * Math.sin(dLat/2) +
+                        Math.cos(Math.toRadians(lat1)) *
+                                Math.cos(Math.toRadians(lat2)) *
+                                Math.sin(dLon/2) *
+                                Math.sin(dLon/2);
+
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        return R * c;
+    }
 
 
 
@@ -129,10 +220,18 @@ public class TxForegroundService extends Service {
             @Override
             public void onLocationResult(LocationResult result) {
 
+
                 if (result == null) return;
 
                 Location loc = result.getLastLocation();
+
                 if (loc == null) return;
+
+                // SMART STOP DETECTION
+                if (!shouldRecordPoint(loc)) {
+                    Log.d("SMART_STOP", "device stationary -> skip point");
+                    return;
+                }
 
                 // filtro alta frequenza
                 if (!highFrequencyTracker.shouldAccept(loc)) {
@@ -158,28 +257,95 @@ public class TxForegroundService extends Service {
 
                 Log.d("BUFFER_TEST", "size=" + size);
 
-                if (size >= 25) {
+                if (size >= 5) {   // minimo punti per evitare SMS troppo piccoli
 
                     List<LatLng> points = new ArrayList<>();
 
+                    LatLng lastKept = null;
+
                     for (GpsPoint gp : rawPoints) {
-                        points.add(new LatLng(gp.getLat(), gp.getLon()));
+
+                        LatLng current = new LatLng(gp.getLat(), gp.getLon());
+
+                        if (lastKept == null) {
+                            points.add(current);
+                            lastKept = current;
+                            continue;
+                        }
+
+                        double dist = distanceMeters(
+                                lastKept.latitude,
+                                lastKept.longitude,
+                                current.latitude,
+                                current.longitude
+                        );
+
+                        // soglia 5 metri
+                        if (dist >= 5) {
+                            points.add(current);
+                            lastKept = current;
+                        }
                     }
 
-                    int seq = sequenceManager.next();
+                    // conversione per polyline
+                    List<Pair<Double, Double>> polyPoints = new ArrayList<>();
 
-                    String sms = SmsTrackCompressor.INSTANCE.compress(points, seq);
-                    Log.d("SMS_TRACK", "seq=" + seq);
-                    Log.d("SMS_TRACK", "payload=" + sms);
-                    Log.d("SMS_TRACK", "length=" + sms.length());
+                    for (LatLng pt : points) {
+                        polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+                    }
 
-                    // QUI in futuro invieremo davvero l'SMS
-                    // sendSms(sms);
+                    // compressione
+                    String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
 
-                    // svuota il buffer
-                    gpsTrackBuffer.clear();
+                    // calcolo lunghezza SMS stimata
+                    int seqPreview = sequenceManager.peekNext();
 
-                    Log.d("SMS_TRACK", "buffer cleared");
+                    int pointsCount = points.size();
+
+                    // header preview
+                    String previewHeader = "T#" + seqPreview + "/" + pointsCount + "|";
+
+                    // preview senza CRC
+                    String previewSms = previewHeader + encoded;
+
+                    // controllo lunghezza SMS
+                    if (previewSms.length() >= 150) {
+
+                        // ora prendiamo davvero la sequenza
+                        int seq = sequenceManager.next();
+
+                        String header = "T#" + seq + "/" + pointsCount + "|";
+
+                        String payload = header + encoded;
+
+                        String crc = SmsCrc.INSTANCE.crc8(payload);
+
+                        String sms = payload + "|" + crc;
+
+                        Log.d("SMS_TRACK", "seq=" + seq);
+                        Log.d("SMS_TRACK", "points=" + pointsCount);
+                        Log.d("SMS_TRACK", "length=" + sms.length());
+                        Log.d("SMS_TRACK", "crc=" + crc);
+                        Log.d("SMS_TRACK", "payload=" + sms);
+
+                        // sendSms(sms);
+
+                        // ROLLING BUFFER (manteniamo ultimi 2 punti)
+                        List<GpsPoint> remaining = new ArrayList<>();
+
+                        if (rawPoints.size() >= 2) {
+                            remaining.add(rawPoints.get(rawPoints.size() - 2));
+                            remaining.add(rawPoints.get(rawPoints.size() - 1));
+                        }
+
+                        gpsTrackBuffer.clear();
+
+                        for (GpsPoint rp : remaining) {
+                            gpsTrackBuffer.addPoint(rp);
+                        }
+
+                        Log.d("SMS_TRACK", "rolling buffer kept=" + remaining.size());
+                    }
                 }
 
                 sendGpsRealtimeUpdate(
@@ -198,8 +364,11 @@ public class TxForegroundService extends Service {
     }
 
 
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+
+        startForeground(NOTIFICATION_ID, createNotification());
 
         if (intent == null) return START_STICKY;
 
@@ -222,13 +391,11 @@ public class TxForegroundService extends Service {
 
             restartContinuousGps();
 
-
             return START_STICKY;
         }
 
         if (ACTION_STOP.equals(action)) {
 
-            // Invia sempre STOP se il numero è valido
             if (phoneNumber != null && !phoneNumber.isEmpty()) {
                 sendControlSms("CTRL:STOP");
             }
@@ -259,6 +426,19 @@ public class TxForegroundService extends Service {
         }
 
         return START_STICKY;
+    }
+
+    private Notification createNotification() {
+
+        NotificationCompat.Builder builder =
+                new NotificationCompat.Builder(this, CHANNEL_ID)
+                        .setContentTitle("SMS GPS Tracker")
+                        .setContentText("Tracking attivo")
+                        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                        .setOngoing(true)
+                        .setPriority(NotificationCompat.PRIORITY_LOW);
+
+        return builder.build();
     }
 
     private void startSignalPolling() {
@@ -355,12 +535,15 @@ public class TxForegroundService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        createNotificationChannel();
         gpsTrackBuffer = new GpsTrackBuffer(this);
         fusedClient = LocationServices.getFusedLocationProviderClient(this);
         createNotificationChannel();
         startSignalMonitor();     // listener sempre attivo
         startSignalPolling();     // polling base 5 sec
     }
+
+
 
     private void requestSingleImmediateLocation() {
 
@@ -661,18 +844,22 @@ public class TxForegroundService extends Service {
 
     private void createNotificationChannel() {
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
 
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Tx Service Channel",
+                    "SMS GPS Tracker",
                     NotificationManager.IMPORTANCE_LOW
             );
 
-            NotificationManager manager =
-                    getSystemService(NotificationManager.class);
+            channel.setDescription("Tracking GPS in background");
 
-            manager.createNotificationChannel(channel);
+            NotificationManager manager =
+                    (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
         }
     }
 
