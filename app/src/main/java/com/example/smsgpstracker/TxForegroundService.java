@@ -376,6 +376,19 @@ public class TxForegroundService extends Service {
 
         Log.d("TX_DEBUG", "ACTION RICEVUTA: " + action);
 
+        String mode = intent.getStringExtra("MODE");
+
+        if ("MULTI_GPS_SMS".equals(mode)) {
+
+            Log.d("TX_SERVICE", "MULTI GPS MODE ATTIVO");
+
+            monitorIntervalMs = 1000; // GPS veloce per traccia
+
+            restartContinuousGps();
+
+            return START_STICKY;
+        }
+
         if (ACTION_START.equals(action)) {
 
             phoneNumber = intent.getStringExtra("phone");
