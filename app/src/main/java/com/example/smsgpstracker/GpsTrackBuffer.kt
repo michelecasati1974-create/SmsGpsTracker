@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 
+private val memoryBuffer = mutableListOf<GpsPoint>()
+
 data class GpsPoint(
     val timestamp: Long,
     val lat: Double,
@@ -20,33 +22,36 @@ class GpsTrackBuffer(context: Context) {
         context.getSharedPreferences("TRACK_BUFFER", Context.MODE_PRIVATE)
 
     private val KEY_BUFFER = "gps_buffer"
+    private val MAX_POINTS = 400
 
     fun addPoint(point: GpsPoint) {
 
-        val array = getArray()
+        memoryBuffer.add(point)
 
-        val obj = JSONObject()
-        obj.put("t", point.timestamp)
-        obj.put("la", point.lat)
-        obj.put("lo", point.lon)
-        obj.put("ac", point.acc)
+        if (memoryBuffer.size > MAX_POINTS) {
+            memoryBuffer.removeAt(0)
+        }
 
-        array.put(obj)
-
-        saveArray(array)
+        // salvataggio asincrono ogni 10 punti
+        if (memoryBuffer.size % 10 == 0) {
+            saveToPrefs()
+        }
     }
 
     fun getPoints(): List<GpsPoint> {
 
-        val list = mutableListOf<GpsPoint>()
+        if (memoryBuffer.isNotEmpty()) {
+            return memoryBuffer
+        }
+
         val array = getArray()
 
         for (i in 0 until array.length()) {
 
             val o = array.getJSONObject(i)
 
-            list.add(
-                com.example.smsgpstracker.GpsPoint(
+            memoryBuffer.add(
+                GpsPoint(
                     o.getLong("t"),
                     o.getDouble("la"),
                     o.getDouble("lo"),
@@ -55,7 +60,27 @@ class GpsTrackBuffer(context: Context) {
             )
         }
 
-        return list
+
+        return memoryBuffer
+    }
+
+    private fun saveToPrefs() {
+
+        val array = JSONArray()
+
+        for (p in memoryBuffer) {
+
+            val obj = JSONObject()
+
+            obj.put("t", p.timestamp)
+            obj.put("la", p.lat)
+            obj.put("lo", p.lon)
+            obj.put("ac", p.acc)
+
+            array.put(obj)
+        }
+
+        saveArray(array)
     }
 
     fun clear() {

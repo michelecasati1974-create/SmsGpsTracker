@@ -32,6 +32,10 @@ import com.google.android.gms.maps.model.LatLngBounds
 import androidx.activity.addCallback
 import androidx.appcompat.app.AlertDialog
 import android.util.Log
+import com.example.smsgpstracker.rxmulti.RxMultiSmsParser
+import com.example.smsgpstracker.rxmulti.RxMultiTrackAssembler
+import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
+
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -58,6 +62,12 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private val rxAssembler = RxTrackAssembler()
 
+    private val multiParser = RxMultiSmsParser()
+
+    private val multiAssembler = RxMultiTrackAssembler()
+
+
+
 
     // =====================================================
     // RECEIVER SMS
@@ -65,6 +75,41 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private val smsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val msg = intent?.getStringExtra("SMS_BODY") ?: return
+
+            // =====================================================
+// MULTI GPS SMS MODE (nuovo protocollo)
+// =====================================================
+            if (msg.startsWith("T#")) {
+
+                try {
+
+                    val packet = multiParser.parse(msg)
+
+                    if (packet != null) {
+
+                        val pts = multiAssembler.process(packet)
+
+                        RxMultiTrackRepository.add(pts)
+
+                        for (p in pts) {
+
+                            val latLng = LatLng(p.first, p.second)
+
+                            trackPoints.add(latLng)
+                        }
+
+                        Log.d("RX_MULTI", "punti ricevuti = ${pts.size}")
+
+                        if (mapReady) drawAllPoints()
+                    }
+
+                } catch (e: Exception) {
+
+                    Log.e("RX_MULTI", "errore parsing", e)
+                }
+
+                return
+            }
 
             // =====================================================
             // TRACK SMS (protocollo T#)

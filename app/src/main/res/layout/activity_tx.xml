@@ -295,6 +295,14 @@
             <!-- PULSANTI -->
 
             <Button
+                android:id="@+id/btnForcePosition"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:enabled="false"
+                android:text="INVIA POSIZIONE ORA" />
+
+            <Button
                 android:id="@+id/btnStartTx"
                 android:text="START"
                 android:layout_marginTop="20dp"
@@ -309,19 +317,22 @@
                 android:layout_height="wrap_content"/>
 
             <Button
-                android:id="@+id/btnForcePosition"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="INVIA POSIZIONE ORA"
-                android:enabled="false"
-                android:layout_marginTop="8dp"/>
-
-            <Button
                 android:id="@+id/btnSettings"
                 android:text="SETTINGS"
                 android:layout_marginTop="8dp"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"/>
+
+            <TextView
+                android:id="@+id/txtDebugConsole"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="TX DEBUG"
+                android:textSize="12sp"
+                android:padding="10dp"
+                android:textColor="#00FF00"
+                android:background="#222222"
+                android:fontFamily="monospace"/>
 
         </LinearLayout>
 

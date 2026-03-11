@@ -6,7 +6,7 @@ import kotlin.math.roundToInt
 object SmsTrackCompressor {
 
     private const val SCALE = 100000
-    private const val MAX_SMS_LENGTH = 150
+    private const val MAX_SMS_LENGTH = 155
 
     fun compress(points: List<LatLng>, seq: Int): String {
 

@@ -1,5 +1,4 @@
 package com.example.smsgpstracker;
-
 import android.Manifest;
 import android.app.*;
 import android.content.Intent;
@@ -7,11 +6,9 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.os.*;
 import android.telephony.SmsManager;
-
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
-
 import com.google.android.gms.location.*;
 import android.util.Log;
 import android.content.SharedPreferences;
@@ -25,91 +22,79 @@ import com.google.android.gms.maps.model.LatLng;
 import kotlin.Pair;
 import com.example.smsgpstracker.tx.PolylineCodec;
 import android.content.Context;
-
-
+import com.example.smsgpstracker.tx.TrackSimplifier;
 
 
 public class TxForegroundService extends Service {
 
 
-
     public static final String ACTION_START = "ACTION_START";
-
     public static final String ACTION_FORCE_POSITION = "com.example.smsgpstracker.FORCE_POSITION";
-
     public static final String ACTION_STOP = "ACTION_STOP";
     public static final String ACTION_UPDATE =
             "com.example.smsgpstracker.TX_UPDATE";
     public static final String ACTION_ABORT = "ACTION_ABORT";
-
     public static final String ACTION_SET_MONITOR_INTERVAL =
             "com.example.smsgpstracker.SET_MONITOR_INTERVAL";
-
-
-
     private GpsTrackBuffer gpsTrackBuffer;
-
     private TelephonyManager telephonyManager;
     private PhoneStateListener signalListener;
-
     private int lastSignalDbm = Integer.MIN_VALUE;
-
     private static final String CHANNEL_ID = "TxServiceChannel";
-
     private FusedLocationProviderClient fusedClient;
-
     private boolean isRunning = false;
     private int smsSent = 0;
     private int maxSms = 0;
     private int intervalMinutes = 1;
     private String phoneNumber = "";
-
     private long cycleStartTime = 0;
-
     private long nextTickTime = 0;
-
     private boolean noSignalAlertEnabled = false;
     private long noSignalStartTime = 0;
     private boolean vibrationTriggered = false;
     private static final int NOTIFICATION_ID = 1;
-
-
     private Handler handler = new Handler(Looper.getMainLooper(), null);
     private Handler uiHandler = new Handler(Looper.getMainLooper());
     private HighFrequencyTracker highFrequencyTracker = new HighFrequencyTracker();
     private SequenceManager sequenceManager = new SequenceManager();
-
     private Runnable uiRunnable;
-
     private Location lastLocation = null;
     private LocationCallback continuousLocationCallback;
-
     private double lastLatitude = 0;
     private double lastLongitude = 0;
-
     private long monitorIntervalMs = 5000;
-
     private Handler signalHandler = new Handler(Looper.getMainLooper());
     private Runnable signalPollRunnable;
-
     private long lastMovementTime = 0;
-
     private boolean stopMode = false;
-
-
-
-
-
     private boolean gpsFixValid = false;
-
     private boolean continuousMode = false;
-
     private static final float MOVEMENT_DISTANCE_METERS = 5f;
     private static final long STOP_TIMEOUT_MS = 120000; // 2 minuti
-
-
     private long rxTimeoutMs;
     private Handler rxMonitorHandler = new Handler(Looper.getMainLooper());
+    private long lastSmsTime = 0;
+    private int smsIntervalMinutes = 10;
+    private SharedPreferences seqPrefs;
+    private int sequenceNumber = 0;
+    private static final String SEQ_PREFS = "tx_sequence_prefs";
+    private static final String KEY_SEQ = "tx_sequence";
+    private static final String STATE_PREFS = "tx_state_prefs";
+    private static final String KEY_TX_STATE = "tx_state";
+
+
+
+    ///////Nuovi parametri configurabili (Settings)/////
+    private long trackSmsIntervalMs = 15 * 60 * 1000; // 15 minuti default
+    private int trackSmsMaxLen = 140;                 // sicurezza SMS
+    private long lastTrackSmsTime = 0;
+    ////////////////////////////////////////////////////
+
+    private SharedPreferences statePrefs;
+
+
+
+
 
     private float distanceMeters(Location a, Location b) {
 
@@ -247,6 +232,20 @@ public class TxForegroundService extends Service {
                 float acc = loc.getAccuracy();
                 long ts = loc.getTime();
 
+                Log.d("TX_GPS",
+                        "lat=" + lat +
+                                " lon=" + lon +
+                                " acc=" + acc +
+                                " ts=" + ts);
+
+                Intent intent = new Intent("TX_DEBUG_UPDATE");
+
+                intent.putExtra("accuracy", acc);
+                intent.putExtra("buffer", gpsTrackBuffer.getPoints().size());
+                intent.putExtra("seq", sequenceManager.peekNext());
+
+                sendBroadcast(intent);
+
                 GpsPoint p = new GpsPoint(ts, lat, lon, acc);
 
                 gpsTrackBuffer.addPoint(p);
@@ -257,10 +256,9 @@ public class TxForegroundService extends Service {
 
                 Log.d("BUFFER_TEST", "size=" + size);
 
-                if (size >= 5) {   // minimo punti per evitare SMS troppo piccoli
+                if (size >= 5) {
 
                     List<LatLng> points = new ArrayList<>();
-
                     LatLng lastKept = null;
 
                     for (GpsPoint gp : rawPoints) {
@@ -280,38 +278,73 @@ public class TxForegroundService extends Service {
                                 current.longitude
                         );
 
-                        // soglia 5 metri
+                        // filtro distanza minima
                         if (dist >= 5) {
                             points.add(current);
                             lastKept = current;
                         }
                     }
 
-                    // conversione per polyline
+                    // se dopo il filtro rimangono pochi punti non ha senso comprimere
+                    if (points.size() < 3) {
+                        return;
+                    }
+
+                    // ================================
+                    // TRACK SIMPLIFICATION
+                    // ================================
+
+                    List<LatLng> simplified =
+                            TrackSimplifier.simplify(points, 0.00001);
+
+                    if (simplified.size() < 2) {
+                        return;
+                    }
+
+                    // conversione polyline
                     List<Pair<Double, Double>> polyPoints = new ArrayList<>();
 
-                    for (LatLng pt : points) {
+                    for (LatLng pt : simplified) {
                         polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
                     }
 
-                    // compressione
+                    // compressione polyline
                     String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
 
-                    // calcolo lunghezza SMS stimata
+                    int pointsCount = simplified.size();
+
                     int seqPreview = sequenceManager.peekNext();
 
-                    int pointsCount = points.size();
-
-                    // header preview
                     String previewHeader = "T#" + seqPreview + "/" + pointsCount + "|";
 
-                    // preview senza CRC
                     String previewSms = previewHeader + encoded;
 
-                    // controllo lunghezza SMS
-                    if (previewSms.length() >= 150) {
+                    Log.d("TRACK_STATS",
+                            "raw=" + rawPoints.size()
+                                    + " filtered=" + points.size()
+                                    + " simplified=" + pointsCount
+                                    + " encodedLen=" + encoded.length()
+                                    + " smsLen=" + previewSms.length());
 
-                        // ora prendiamo davvero la sequenza
+                    long now = System.currentTimeMillis();
+
+                    boolean timeReached =
+                            now - lastTrackSmsTime >= trackSmsIntervalMs;
+
+                    boolean smsFull =
+                            previewSms.length() >= trackSmsMaxLen;
+
+                    // sicurezza: evita buffer troppo grande
+                    boolean bufferLarge =
+                            pointsCount >= 120;
+
+                    if (timeReached || smsFull || bufferLarge) {
+
+                        Log.d("TRACK_SMS_TRIGGER",
+                                "time=" + timeReached +
+                                        " full=" + smsFull +
+                                        " buffer=" + bufferLarge);
+
                         int seq = sequenceManager.next();
 
                         String header = "T#" + seq + "/" + pointsCount + "|";
@@ -324,13 +357,21 @@ public class TxForegroundService extends Service {
 
                         Log.d("SMS_TRACK", "seq=" + seq);
                         Log.d("SMS_TRACK", "points=" + pointsCount);
-                        Log.d("SMS_TRACK", "length=" + sms.length());
-                        Log.d("SMS_TRACK", "crc=" + crc);
-                        Log.d("SMS_TRACK", "payload=" + sms);
+                        Log.d("SMS_TRACK", "smsLen=" + sms.length());
+                        Log.d("SMS_TRACK", "reason=" +
+                                (smsFull ? "FULL " : "") +
+                                (timeReached ? "TIME " : "") +
+                                (bufferLarge ? "BUFFER " : ""));
 
-                        // sendSms(sms);
+                        sendTrackSms(sms);
 
-                        // ROLLING BUFFER (manteniamo ultimi 2 punti)
+
+                        lastTrackSmsTime = now;
+
+                        // ================================
+                        // ROLLING BUFFER
+                        // ================================
+
                         List<GpsPoint> remaining = new ArrayList<>();
 
                         if (rawPoints.size() >= 2) {
@@ -344,7 +385,8 @@ public class TxForegroundService extends Service {
                             gpsTrackBuffer.addPoint(rp);
                         }
 
-                        Log.d("SMS_TRACK", "rolling buffer kept=" + remaining.size());
+                        Log.d("SMS_TRACK",
+                                "rollingBuffer=" + remaining.size());
                     }
                 }
 
@@ -367,6 +409,7 @@ public class TxForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        Log.d("TX_SERVICE", "Service started");
 
         startForeground(NOTIFICATION_ID, createNotification());
 
@@ -382,7 +425,7 @@ public class TxForegroundService extends Service {
 
             Log.d("TX_SERVICE", "MULTI GPS MODE ATTIVO");
 
-            monitorIntervalMs = 1000; // GPS veloce per traccia
+            monitorIntervalMs = 5000; // 5 secondi // GPS veloce per traccia
 
             restartContinuousGps();
 
@@ -398,7 +441,9 @@ public class TxForegroundService extends Service {
             noSignalAlertEnabled =
                     intent.getBooleanExtra("noSignalAlert", false);
 
+            saveTxState("TRACKING");
             startTracking();
+
 
             monitorIntervalMs = 5000;
 
@@ -409,12 +454,24 @@ public class TxForegroundService extends Service {
 
         if (ACTION_STOP.equals(action)) {
 
+            Log.d("TX_SERVICE", "STOP ACTION RECEIVED");
+
             if (phoneNumber != null && !phoneNumber.isEmpty()) {
                 sendControlSms("CTRL:STOP");
             }
 
+            saveTxState("IDLE");
+
+            // ferma GPS e tracking
             stopTrackingInternal();
-            return START_STICKY;
+
+            // rimuove la notifica foreground
+            stopForeground(true);
+
+            // distrugge il service
+            stopSelf();
+
+            return START_NOT_STICKY;
         }
 
         if ("ACTION_ABORT".equals(action)) {
@@ -539,15 +596,33 @@ public class TxForegroundService extends Service {
 
         startSignalPolling();
     }
+    private int getNextSequence() {
 
+        sequenceNumber++;
 
+        seqPrefs.edit()
+                .putInt(KEY_SEQ, sequenceNumber)
+                .apply();
 
+        return sequenceNumber;
+    }
 
+    private void saveTxState(String state) {
 
+        statePrefs.edit()
+                .putString(KEY_TX_STATE, state)
+                .apply();
+
+        Log.d("TX_STATE", "Saved state=" + state);
+    }
 
     @Override
     public void onCreate() {
+        statePrefs = getSharedPreferences(STATE_PREFS, MODE_PRIVATE);
         super.onCreate();
+        Log.d("TX_SERVICE", "Service created");
+        seqPrefs = getSharedPreferences(SEQ_PREFS, MODE_PRIVATE);
+        sequenceNumber = seqPrefs.getInt(KEY_SEQ, 0);
         createNotificationChannel();
         gpsTrackBuffer = new GpsTrackBuffer(this);
         fusedClient = LocationServices.getFusedLocationProviderClient(this);
@@ -556,6 +631,20 @@ public class TxForegroundService extends Service {
         startSignalPolling();     // polling base 5 sec
     }
 
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+
+        Log.d("TX_SERVICE", "Service destroyed");
+
+        // fermiamo GPS updates
+        if (fusedClient != null && continuousLocationCallback != null) {
+            fusedClient.removeLocationUpdates(continuousLocationCallback);
+        }
+        stopForeground(true);
+
+        // eventuali cleanup
+    }
 
 
     private void requestSingleImmediateLocation() {
@@ -764,6 +853,40 @@ public class TxForegroundService extends Service {
         intent.setPackage(getPackageName());
 
         sendBroadcast(intent);
+    }
+
+    private void sendTrackSms(String text) {
+
+        // controllo numero destinatario
+        if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
+
+            Log.e("SMS_TRACK", "Numero RX non valido o non impostato");
+            return;
+        }
+
+        SmsManager smsManager;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            smsManager = getSystemService(SmsManager.class);
+        } else {
+            smsManager = SmsManager.getDefault();
+        }
+
+        try {
+
+            Log.d("SMS_TRACK", "Invio SMS a: " + phoneNumber);
+            Log.d("SMS_TRACK", "Payload: " + text);
+
+            smsManager.sendTextMessage(phoneNumber, null, text, null, null);
+
+            smsSent++;
+
+            Log.d("SMS_TRACK", "SMS inviato");
+
+        } catch (Exception e) {
+
+            Log.e("SMS_TRACK", "Errore invio SMS: " + e.getMessage());
+        }
     }
 
 

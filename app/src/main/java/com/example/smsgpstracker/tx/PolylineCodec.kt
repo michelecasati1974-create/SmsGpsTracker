@@ -4,7 +4,7 @@ import kotlin.math.roundToInt
 
 object PolylineCodec {
 
-    private const val SCALE = 1e5
+    private const val SCALE = 1e4
 
     // ======================================
     // ENCODE

@@ -1,14 +1,23 @@
 package com.example.smsgpstracker
 
 import android.annotation.SuppressLint
-import android.content.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.widget.*
-import androidx.appcompat.app.AppCompatActivity
 import android.util.Log
+import android.view.View
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ImageView
+import android.widget.Switch
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 class TxActivity : AppCompatActivity() {
@@ -27,35 +36,43 @@ class TxActivity : AppCompatActivity() {
     private lateinit var btnStartTx: Button
     private lateinit var btnStopTx: Button
     private lateinit var btnSettings: Button
-
     private lateinit var imgLedTx: ImageView
     private lateinit var imgLedRx: ImageView
     private lateinit var txtGpsInfo: TextView
     private lateinit var txtSignalInfo: TextView
-
     private lateinit var signalBars: List<View>
     private lateinit var gpsBars: List<View>
-
     private lateinit var btnForcePosition: Button
-
     private lateinit var switchContinuousMode: Switch
-
     private lateinit var switchFastMonitor: Switch
     private var monitorIntervalMs = 5000L
     private val normalInterval = 5000L
     private val fastInterval = 500L
-
     private lateinit var switchMultiGpsSms: Switch
     private var multiGpsMode = false
-
-
-
+    private lateinit var txtDebugConsole: TextView
     private var currentStatus = TxStatus.IDLE
     private var rxStatus = RxRemoteStatus.UNKNOWN
     private lateinit var switchNoSignalAlert: Switch
-
     enum class TxStatus { IDLE, WAITING, TRACKING }
     enum class RxRemoteStatus { UNKNOWN, ALIVE, LOST }
+
+    private val debugReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            val acc = intent?.getFloatExtra("accuracy", 0f) ?: 0f
+            val buffer = intent?.getIntExtra("buffer", 0) ?: 0
+            val seq = intent?.getIntExtra("seq", 0) ?: 0
+
+            updateDebugConsole(
+                acc,
+                buffer,
+                seq,
+                "--"
+            )
+        }
+    }
 
     private val updateReceiver = object : BroadcastReceiver() {
 
@@ -100,6 +117,23 @@ class TxActivity : AppCompatActivity() {
                 updateSignalUi(dbm)
             }
         }
+    }
+
+    fun updateDebugConsole(
+        gpsAccuracy: Float,
+        bufferSize: Int,
+        seq: Int,
+        lastSmsTime: String
+    ) {
+
+        val text = """
+        GPS accuracy: $gpsAccuracy m
+        Buffer points: $bufferSize
+        SMS sequence: $seq
+        Last SMS: $lastSmsTime
+    """.trimIndent()
+
+        txtDebugConsole.text = text
     }
 
     private fun forceSendPosition() {
@@ -154,6 +188,16 @@ class TxActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
+        val debugFilter = IntentFilter("TX_DEBUG_UPDATE")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(debugReceiver, debugFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(debugReceiver, debugFilter)
+        }
+
+        restoreServiceState()
+
         val filter = IntentFilter().apply {
             addAction("com.example.smsgpstracker.TX_GPS_UPDATE")
             addAction(TxForegroundService.ACTION_UPDATE)
@@ -168,20 +212,46 @@ class TxActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        try { unregisterReceiver(updateReceiver) } catch (_: Exception) {}
+        try {
+            unregisterReceiver(updateReceiver)
+        } catch (_: Exception) {}
+
+        try {
+            unregisterReceiver(debugReceiver)
+        } catch (_: Exception) {}
     }
 
     // =====================================================
     // ON CREATE
     // =====================================================
 
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         setContentView(R.layout.activity_tx)
 
-        switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        txtDebugConsole = findViewById(R.id.txtDebugConsole)
+        btnStartTx = findViewById(R.id.btnStartTx)
+        btnStopTx = findViewById(R.id.btnStopTx)
+        btnSettings = findViewById(R.id.btnSettings)
+        btnForcePosition = findViewById(R.id.btnForcePosition)
 
+        switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
+        switchContinuousMode = findViewById(R.id.switchContinuousMode)
+
+        edtMaxSms = findViewById(R.id.edtMaxSms)
+        edtInterval = findViewById(R.id.edtInterval)
+
+        txtTimer = findViewById(R.id.txtTimer)
+        txtSmsCounter = findViewById(R.id.txtSmsCounter)
+
+        imgLedTx = findViewById(R.id.imgLedTx)
+        imgLedRx = findViewById(R.id.imgLedRx)
+
+        txtGpsInfo = findViewById(R.id.txtGpsInfo)
+        txtSignalInfo = findViewById(R.id.txtSignalInfo)
         switchMultiGpsSms.setOnCheckedChangeListener { _, isChecked ->
 
             multiGpsMode = isChecked
@@ -209,24 +279,6 @@ class TxActivity : AppCompatActivity() {
             }
         }
 
-
-        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
-        switchContinuousMode = findViewById(R.id.switchContinuousMode)
-        edtMaxSms = findViewById(R.id.edtMaxSms)
-        edtInterval = findViewById(R.id.edtInterval)
-        txtTimer = findViewById(R.id.txtTimer)
-        txtSmsCounter = findViewById(R.id.txtSmsCounter)
-        btnStartTx = findViewById(R.id.btnStartTx)
-        btnStopTx = findViewById(R.id.btnStopTx)
-        btnSettings = findViewById(R.id.btnSettings)
-
-        imgLedTx = findViewById(R.id.imgLedTx)
-        imgLedRx = findViewById(R.id.imgLedRx)
-        txtGpsInfo = findViewById(R.id.txtGpsInfo)
-        txtSignalInfo = findViewById(R.id.txtSignalInfo)
-        switchNoSignalAlert = findViewById(R.id.switchNoSignalAlert)
-
         signalBars = listOf(
             findViewById(R.id.s1),
             findViewById(R.id.s2),
@@ -253,6 +305,14 @@ class TxActivity : AppCompatActivity() {
 
         btnStartTx.setOnClickListener {
 
+            Log.d("TX_UI", "START BUTTON CLICKED")
+
+            // aggiorna subito la UI
+            btnStartTx.isEnabled = false
+            btnStartTx.alpha = 0.5f
+            btnStopTx.isEnabled = true
+            btnStopTx.alpha = 1f
+
             if (multiGpsMode) {
 
                 Log.d("TX_MODE", "START MULTI GPS TRACKING")
@@ -265,8 +325,18 @@ class TxActivity : AppCompatActivity() {
 
                 startTxService()
             }
+
         }
-        btnStopTx.setOnClickListener { stopTxService() }
+        btnStopTx.setOnClickListener {
+
+            Log.d("TX_UI", "STOP BUTTON CLICKED")
+
+            btnStartTx.isEnabled = true
+            btnStartTx.alpha = 1f
+            btnStopTx.isEnabled = false
+            btnStopTx.alpha = 0.5f
+
+            stopTxService() }
         btnForcePosition = findViewById(R.id.btnForcePosition)
 
         btnForcePosition.setOnClickListener {
@@ -480,6 +550,32 @@ class TxActivity : AppCompatActivity() {
             }
 
             bars[i].background.setTint(color)
+        }
+    }
+
+    private fun restoreServiceState() {
+
+        val prefs = getSharedPreferences("tx_state_prefs", MODE_PRIVATE)
+
+        val state = prefs.getString("tx_state", "IDLE")
+
+        Log.d("TX_UI", "Restore state=$state")
+
+        if (state == "TRACKING") {
+
+            btnStartTx.isEnabled = false
+            btnStartTx.alpha = 0.5f
+
+            btnStopTx.isEnabled = true
+            btnStopTx.alpha = 1f
+
+        } else {
+
+            btnStartTx.isEnabled = true
+            btnStartTx.alpha = 1f
+
+            btnStopTx.isEnabled = false
+            btnStopTx.alpha = 0.5f
         }
     }
 
