@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
+
 class TxActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
@@ -56,6 +57,8 @@ class TxActivity : AppCompatActivity() {
     private lateinit var switchNoSignalAlert: Switch
     enum class TxStatus { IDLE, WAITING, TRACKING }
     enum class RxRemoteStatus { UNKNOWN, ALIVE, LOST }
+
+
 
     private val debugReceiver = object : BroadcastReceiver() {
 
@@ -228,28 +231,40 @@ class TxActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContentView(R.layout.activity_tx)
 
+        val btnDebug = findViewById<Button>(R.id.btnDebugSms)
+
+        btnDebug.setOnClickListener {
+
+            val intent = Intent(this, SmsDebugActivity::class.java)
+
+            startActivity(intent)
+
+        }
+        val debugSwitch = findViewById<Switch>(R.id.switchSmsDebug)
+
+        debugSwitch.setOnCheckedChangeListener { _, isChecked ->
+
+            TxForegroundService.smsDebugMode = isChecked
+
+        }
+
+
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        txtDebugConsole = findViewById(R.id.txtDebugConsole)
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
         btnSettings = findViewById(R.id.btnSettings)
         btnForcePosition = findViewById(R.id.btnForcePosition)
-
+        switchNoSignalAlert = findViewById(R.id.switchNoSignalAlert)
         switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
         switchContinuousMode = findViewById(R.id.switchContinuousMode)
-
         edtMaxSms = findViewById(R.id.edtMaxSms)
         edtInterval = findViewById(R.id.edtInterval)
-
         txtTimer = findViewById(R.id.txtTimer)
         txtSmsCounter = findViewById(R.id.txtSmsCounter)
-
         imgLedTx = findViewById(R.id.imgLedTx)
         imgLedRx = findViewById(R.id.imgLedRx)
-
         txtGpsInfo = findViewById(R.id.txtGpsInfo)
         txtSignalInfo = findViewById(R.id.txtSignalInfo)
         switchMultiGpsSms.setOnCheckedChangeListener { _, isChecked ->
@@ -307,25 +322,16 @@ class TxActivity : AppCompatActivity() {
 
             Log.d("TX_UI", "START BUTTON CLICKED")
 
-            // aggiorna subito la UI
-            btnStartTx.isEnabled = false
-            btnStartTx.alpha = 0.5f
-            btnStopTx.isEnabled = true
-            btnStopTx.alpha = 1f
-
             if (multiGpsMode) {
 
                 Log.d("TX_MODE", "START MULTI GPS TRACKING")
-
                 startMultiGpsTracking()
 
             } else {
 
                 Log.d("TX_MODE", "START STANDARD TX")
-
                 startTxService()
             }
-
         }
         btnStopTx.setOnClickListener {
 
@@ -391,9 +397,20 @@ class TxActivity : AppCompatActivity() {
 
     private fun startMultiGpsTracking() {
 
-        val intent = Intent(this, TxForegroundService::class.java)
+        val phone = prefs.getString(KEY_PHONE, null)
 
-        intent.putExtra("MODE", "MULTI_GPS_SMS")
+        if (phone.isNullOrBlank()) {
+            Toast.makeText(this,
+                "Numero RX non configurato in Settings",
+                Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val intent = Intent(this, TxForegroundService::class.java).apply {
+            action = TxForegroundService.ACTION_START
+            putExtra("MODE", "MULTI_GPS_SMS")
+            putExtra("phone", phone)
+        }
 
         ContextCompat.startForegroundService(this, intent)
     }
@@ -403,8 +420,6 @@ class TxActivity : AppCompatActivity() {
     // =====================================================
 
     private fun startTxService() {
-
-
 
         val phone = prefs.getString(KEY_PHONE, null)
 
@@ -416,10 +431,16 @@ class TxActivity : AppCompatActivity() {
         val continuousMode = switchContinuousMode.isChecked
         val maxSms = if (continuousMode) -1
         else edtMaxSms.text.toString().toIntOrNull() ?: 5
+
         val interval = edtInterval.text.toString().toIntOrNull() ?: 10
         val timeoutFactor = prefs.getFloat("timeout_factor", 2.0f)
         val rxTimeoutMs = (interval * timeoutFactor * 60 * 1000).toLong()
 
+        val noSignalAlert =
+            if (::switchNoSignalAlert.isInitialized)
+                switchNoSignalAlert.isChecked
+            else
+                false
 
         saveLocalSettings(maxSms, interval)
 
@@ -429,9 +450,11 @@ class TxActivity : AppCompatActivity() {
             putExtra("maxSms", maxSms)
             putExtra("interval", interval)
             putExtra("rxTimeoutMs", rxTimeoutMs)
-            putExtra("continuousMode", continuousMode)
-            putExtra("noSignalAlert",
-                switchNoSignalAlert.isChecked)
+            putExtra(
+                "MODE",
+                if (continuousMode) "CONTINUOUS" else "STANDARD"
+            )
+            putExtra("noSignalAlert", noSignalAlert)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -596,5 +619,6 @@ class TxActivity : AppCompatActivity() {
         // LED RX torna UNKNOWN (giallo)
         updateRxLed(RxRemoteStatus.UNKNOWN)
     }
+
 
 }

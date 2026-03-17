@@ -8,6 +8,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import android.text.method.PasswordTransformationMethod
 import android.text.method.HideReturnsTransformationMethod
+import android.widget.Switch
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -20,10 +21,13 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var btnSaveSettings: Button
     private lateinit var btnCancelSettings: Button
 
+    private lateinit var switchDebugTrack: Switch
+
     private lateinit var edtNoSignalTc: EditText
     private lateinit var edtVibrationTs: EditText
 
     companion object {
+        private const val KEY_DEBUG_TRACK = "debug_track"
         private const val PREFS_NAME = "SmsGpsTrackerPrefs"
         private const val KEY_PHONE = "phone_rx"
         private const val KEY_SIGNAL = "signal_threshold"
@@ -36,6 +40,7 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(R.layout.settings_activity)
 
         // Bind UI
+        switchDebugTrack = findViewById<Switch>(R.id.switchDebugTrack)
         edtPhoneRx = findViewById(R.id.edtPhoneRx)
         edtSignalThreshold = findViewById(R.id.edtSignalThreshold)
         edtGpsThreshold = findViewById(R.id.edtGpsThreshold)
@@ -87,6 +92,9 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun loadSettings() {
 
+        switchDebugTrack.isChecked =
+            prefs.getBoolean(KEY_DEBUG_TRACK, false)
+
         edtPhoneRx.transformationMethod = PasswordTransformationMethod.getInstance()
 
         edtPhoneRx.setText(prefs.getString(KEY_PHONE, ""))
@@ -118,6 +126,9 @@ class SettingsActivity : AppCompatActivity() {
         val signal = edtSignalThreshold.text.toString().toIntOrNull()
         val gps = edtGpsThreshold.text.toString().toIntOrNull()
         val timeout = edtTimeoutFactor.text.toString().toFloatOrNull()
+        prefs.edit()
+            .putBoolean(KEY_DEBUG_TRACK, switchDebugTrack.isChecked)
+            .apply()
 
         var isValid = true
 

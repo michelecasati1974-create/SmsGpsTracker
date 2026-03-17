@@ -72,6 +72,8 @@
             android:name=".TxActivity"
             android:exported="false" />
 
+        <activity android:name=".SmsDebugActivity"/>
+
         <!-- ===== RX ===== -->
         <activity
             android:name=".RxActivity"
@@ -82,6 +84,9 @@
         <!-- ===== SETTINGS ===== -->
         <activity
             android:name=".SettingsActivity"
+            android:exported="false"/>
+        <activity
+            android:name=".DebugTrackActivity"
             android:exported="false"/>
 
         <!-- ===== SMS RECEIVER ===== -->
