@@ -5,8 +5,6 @@ import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 
-private val memoryBuffer = mutableListOf<GpsPoint>()
-
 data class GpsPoint(
     val timestamp: Long,
     val lat: Double,
@@ -16,7 +14,8 @@ data class GpsPoint(
 
 class GpsTrackBuffer(context: Context) {
 
-
+    // 🔴 ORA È INTERNO ALLA CLASSE (non più globale!)
+    private val memoryBuffer = mutableListOf<GpsPoint>()
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("TRACK_BUFFER", Context.MODE_PRIVATE)
@@ -24,6 +23,10 @@ class GpsTrackBuffer(context: Context) {
     private val KEY_BUFFER = "gps_buffer"
     private val MAX_POINTS = 400
 
+    // ================================
+    // ADD POINT (THREAD SAFE)
+    // ================================
+    @Synchronized
     fun addPoint(point: GpsPoint) {
 
         memoryBuffer.add(point)
@@ -38,13 +41,21 @@ class GpsTrackBuffer(context: Context) {
         }
     }
 
-    fun getPoints(): List<GpsPoint> {
+    // ================================
+    // GET COPY (🔴 SICURO)
+    // ================================
+    @Synchronized
+    fun getPointsCopy(): List<GpsPoint> {
 
+        // se già in memoria → copia
         if (memoryBuffer.isNotEmpty()) {
-            return memoryBuffer
+            return ArrayList(memoryBuffer)
         }
 
+        // altrimenti carica da prefs
         val array = getArray()
+
+        memoryBuffer.clear()
 
         for (i in 0 until array.length()) {
 
@@ -60,10 +71,31 @@ class GpsTrackBuffer(context: Context) {
             )
         }
 
-
-        return memoryBuffer
+        return ArrayList(memoryBuffer)
     }
 
+    // ================================
+    // CLEAR (🔴 FIX CRITICO)
+    // ================================
+    @Synchronized
+    fun clear() {
+
+        memoryBuffer.clear() // 🔥 PRIMA MANCAVA!
+
+        prefs.edit().remove(KEY_BUFFER).apply()
+    }
+
+    // ================================
+    // COUNT (SAFE)
+    // ================================
+    @Synchronized
+    fun count(): Int {
+        return memoryBuffer.size
+    }
+
+    // ================================
+    // SAVE
+    // ================================
     private fun saveToPrefs() {
 
         val array = JSONArray()
@@ -81,14 +113,6 @@ class GpsTrackBuffer(context: Context) {
         }
 
         saveArray(array)
-    }
-
-    fun clear() {
-        prefs.edit().remove(KEY_BUFFER).apply()
-    }
-
-    fun count(): Int {
-        return getArray().length()
     }
 
     private fun getArray(): JSONArray {

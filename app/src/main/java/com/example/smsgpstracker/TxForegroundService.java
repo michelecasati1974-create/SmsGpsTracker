@@ -105,13 +105,14 @@ public class TxForegroundService extends Service {
     private boolean ignoreFirstGpsFix = true;
     private long sessionStartTime = 0;
     private long sessionEndTime = 0;
-
+    private boolean isProcessing = false;
     private double totalDistanceMeters = 0;
 
     private float accuracySum = 0;
     private int accuracyCount = 0;
 
     private Location lastDistanceLocation = null;
+    private final Object bufferLock = new Object();
 
 
 
@@ -138,6 +139,13 @@ public class TxForegroundService extends Service {
     private int gpsPointsSent = 0;
 
     private long adaptiveGpsInterval = 3000;
+
+    // ===== MULTI GPS ADVANCED SETTINGS =====
+    private float trackSimplifyTolerance = 0.00005f;
+    private float trackAngleThreshold = 10f;
+    private int maxPointsPerSms = 5;
+    private long multiGpsSendIntervalMs = 15000;
+    private int keepPoints = 3;
     ////////////////////////////////////////////////////
 
     private SharedPreferences statePrefs;
@@ -196,7 +204,7 @@ public class TxForegroundService extends Service {
                 sendSms(lastLocation);
             }
 
-            smsHandler.postDelayed(this, trackSmsIntervalMs);
+            smsHandler.postDelayed(this, multiGpsSendIntervalMs);
         }
     };
 
@@ -369,22 +377,22 @@ public class TxForegroundService extends Service {
                 .build();
 
         continuousLocationCallback = new LocationCallback() {
+
             @Override
             public void onLocationResult(LocationResult result) {
 
                 if (result == null) return;
-                // IGNORA PRIMO FIX (spesso è cached)
+
+                // IGNORA PRIMO FIX (spesso cached)
                 if (ignoreFirstGpsFix) {
 
                     ignoreFirstGpsFix = false;
-
                     Log.d("GPS_FILTER", "Ignoring first cached fix");
 
                     return;
                 }
 
                 Location loc = result.getLastLocation();
-
                 if (loc == null) return;
 
                 updateAdaptiveGpsInterval(loc);
@@ -397,7 +405,7 @@ public class TxForegroundService extends Service {
                 }
 
                 // =====================================
-                // MICRO FILTER 3 METERS
+                // MICRO FILTER (mantienilo, è leggero)
                 // =====================================
 
                 if (lastAcceptedLocation != null) {
@@ -405,27 +413,24 @@ public class TxForegroundService extends Service {
                     float dist = loc.distanceTo(lastAcceptedLocation);
 
                     if (dist < 3) {
-
                         Log.d("GPS_FILTER", "skip <3m");
-
                         return;
                     }
                 }
 
                 lastAcceptedLocation = loc;
 
-                // aggiorna posizione usata dagli SMS
+                // aggiorna posizione usata dagli SMS realtime
                 lastLocation = loc;
 
                 // conta ogni fix GPS ricevuto
                 gpsPointsCollected++;
 
-            // =====================================
-            // SESSION STATS (distance + accuracy)
-            // =====================================
+                // =====================================
+                // SESSION STATS
+                // =====================================
 
                 if (loc.hasAccuracy()) {
-
                     accuracySum += loc.getAccuracy();
                     accuracyCount++;
                 }
@@ -441,8 +446,6 @@ public class TxForegroundService extends Service {
 
                 lastDistanceLocation = loc;
 
-
-
                 gpsFixValid = loc.hasAccuracy() && loc.getAccuracy() <= 100;
 
                 double lat = loc.getLatitude();
@@ -456,189 +459,60 @@ public class TxForegroundService extends Service {
                                 " acc=" + acc +
                                 " ts=" + ts);
 
+                // =====================================
+                // DEBUG UI (OK mantenerlo)
+                // =====================================
+
                 Intent intent = new Intent("TX_DEBUG_UPDATE");
 
                 intent.putExtra("accuracy", acc);
-                intent.putExtra("buffer", gpsTrackBuffer.getPoints().size());
+
+                synchronized (bufferLock) {
+                    intent.putExtra("buffer", gpsTrackBuffer.getPointsCopy().size());
+                }
+
                 intent.putExtra("seq", sequenceManager.peekNext());
 
                 sendBroadcast(intent);
 
+                // =====================================
+                // CREAZIONE PUNTO GPS
+                // =====================================
+
                 GpsPoint p = new GpsPoint(ts, lat, lon, acc);
 
+                // =====================================
+                // REALTIME MODE (no buffer)
+                // =====================================
+
                 if (!multiGpsMode) {
+
                     sendGpsRealtimeUpdate(
                             lat,
                             lon,
                             loc.getAccuracy()
                     );
+
                     return;
                 }
 
-                gpsTrackBuffer.addPoint(p);
+                // =====================================
+                // BUFFER ONLY (CORE CHANGE)
+                // =====================================
 
-                List<GpsPoint> rawPoints = gpsTrackBuffer.getPoints();
+                synchronized (bufferLock) {
+                    gpsTrackBuffer.addPoint(p);
+                }
 
-                int size = rawPoints.size();
+                // 👇 SOLO LOG DI DEBUG (opzionale)
+                int size;
+
+                synchronized (bufferLock) {
+                    size = gpsTrackBuffer.getPointsCopy().size();
+                }
 
                 Log.d("BUFFER_TEST", "size=" + size);
 
-                if (size >= 5) {
-
-                    List<LatLng> points = new ArrayList<>();
-                    LatLng lastKept = null;
-
-                    for (GpsPoint gp : rawPoints) {
-
-                        LatLng current = new LatLng(gp.getLat(), gp.getLon());
-
-                        if (lastKept == null) {
-                            points.add(current);
-                            lastKept = current;
-                            continue;
-                        }
-
-                        double dist = distanceMeters(
-                                lastKept.latitude,
-                                lastKept.longitude,
-                                current.latitude,
-                                current.longitude
-                        );
-
-                        // filtro distanza minima
-                        if (dist < trackSimplifyDistance) {
-                            continue;
-                        }
-
-                        // FILTRO ANGOLARE (compressione extra)
-                        if (points.size() >= 2) {
-
-                            LatLng prev = points.get(points.size() - 2);
-                            LatLng last = points.get(points.size() - 1);
-
-                            double angle = angleBetween(prev, last, current);
-
-                            if (Math.abs(angle) < 8) {
-                                // movimento quasi in linea retta
-                                points.set(points.size() - 1, current);
-                                lastKept = current;
-                                continue;
-                            }
-                        }
-
-                        points.add(current);
-                        lastKept = current;
-                    }
-
-                    // se dopo il filtro rimangono pochi punti non ha senso comprimere
-                    if (points.size() < 3) {
-                        return;
-                    }
-
-                    // ================================
-                    // TRACK SIMPLIFICATION
-                    // ================================
-
-                    List<LatLng> simplified =
-                            TrackSimplifier.simplify(points, 0.00001);
-                    if (debugTrackEnabled && !DebugTrackActivity.isOpen) {
-
-                        List<LatLng> rawLatLng = new ArrayList<>();
-
-                        for (GpsPoint gp : rawPoints) {
-                            rawLatLng.add(new LatLng(gp.getLat(), gp.getLon()));
-                        }
-
-                        DebugTrackStore.raw = rawLatLng;
-                        DebugTrackStore.filtered = points;
-                        DebugTrackStore.simplified = simplified;
-
-                        if (debugTrackEnabled && !DebugTrackActivity.isOpen) {
-
-                            Intent i = new Intent(TxForegroundService.this, DebugTrackActivity.class);
-                            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            startActivity(i);
-                        }
-                    }
-
-                    if (simplified.size() < 2) {
-                        return;
-                    }
-
-                    // conversione polyline
-                    List<Pair<Double, Double>> polyPoints = new ArrayList<>();
-
-                    for (LatLng pt : simplified) {
-                        polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
-                    }
-
-                    // compressione polyline
-                    String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
-
-                    // LIMITAZIONE LUNGHEZZA SMS (sicurezza GSM)
-                    if (encoded.length() > 150) {
-                        encoded = encoded.substring(0, 150);
-                    }
-
-                    int pointsCount = simplified.size();
-
-                    int seqPreview = sequenceManager.peekNext();
-
-                    String previewSms = "T|" + encoded;
-
-                    Log.d("TRACK_STATS",
-                            "raw=" + rawPoints.size()
-                                    + " filtered=" + points.size()
-                                    + " simplified=" + pointsCount
-                                    + " encodedLen=" + encoded.length()
-                                    + " smsLen=" + previewSms.length());
-
-                    long now = System.currentTimeMillis();
-
-                    boolean timeReached =
-                            now - lastTrackSmsTime >= trackSmsIntervalMs;
-
-                    boolean smsFull =
-                            previewSms.length() >= trackSmsMaxLen;
-
-                    if (timeReached || smsFull) {
-
-                        Log.d("TRACK_SMS_TRIGGER",
-                                "time=" + timeReached +
-                                        " full=" + smsFull);
-
-
-                        int seq = sequenceManager.next();
-
-                        String payload = "T|" + encoded;
-
-                        String crc = SmsCrc.INSTANCE.crc8(payload);
-
-                        String sms = payload + "|" + crc;
-
-                        Log.d("SMS_TRACK", "seq=" + seq);
-                        Log.d("SMS_TRACK", "points=" + pointsCount);
-                        Log.d("SMS_TRACK", "smsLen=" + sms.length());
-                        Log.d("SMS_TRACK", "reason=" +
-                                (smsFull ? "FULL " : "") +
-                                (timeReached ? "TIME " : ""));
-
-                        sendTrackSms(sms);
-
-                        lastTrackSmsTime = now;
-
-                        // ================================
-                        // ROLLING BUFFER
-                        // ================================
-
-                        List<GpsPoint> remaining = new ArrayList<>();
-
-                        gpsTrackBuffer.clear();
-
-                        Log.d("SMS_TRACK",
-                                "rollingBuffer=" + remaining.size());
-                    }
-                }
 
                 sendGpsRealtimeUpdate(
                         lat,
@@ -655,6 +529,20 @@ public class TxForegroundService extends Service {
         );
     }
 
+    private Handler trackHandler = new Handler(Looper.getMainLooper());
+
+    private final Runnable trackProcessorRunnable = new Runnable() {
+        @Override
+        public void run() {
+
+            if (!isRunning || !multiGpsMode) return;
+
+            processTrackBuffer();
+
+            trackHandler.postDelayed(this, multiGpsSendIntervalMs);
+        }
+    };
+
     private void flushTrackBuffer() {
 
         // sicurezza: flush solo in modalità MULTI_GPS
@@ -662,11 +550,19 @@ public class TxForegroundService extends Service {
             return;
         }
 
-        List<GpsPoint> rawPoints = gpsTrackBuffer.getPoints();
+        List<GpsPoint> rawPoints;
 
-        if (rawPoints == null || rawPoints.size() < 3) {
-            gpsTrackBuffer.clear();
-            return;
+        // ✅ COPIA SICURA DEL BUFFER
+        synchronized (bufferLock) {
+
+            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+            if (current == null || current.size() < 3) {
+                gpsTrackBuffer.clear();
+                return;
+            }
+
+            rawPoints = new ArrayList<>(current);
         }
 
         // ================================
@@ -700,7 +596,9 @@ public class TxForegroundService extends Service {
         }
 
         if (filtered.size() < 2) {
-            gpsTrackBuffer.clear();
+            synchronized (bufferLock) {
+                gpsTrackBuffer.clear();
+            }
             return;
         }
 
@@ -709,10 +607,12 @@ public class TxForegroundService extends Service {
         // ================================
 
         List<LatLng> simplified =
-                TrackSimplifier.simplify(filtered, 0.00001);
+                TrackSimplifier.simplify(filtered, 0.0001);
 
         if (simplified.size() < 2) {
-            gpsTrackBuffer.clear();
+            synchronized (bufferLock) {
+                gpsTrackBuffer.clear();
+            }
             return;
         }
 
@@ -728,9 +628,18 @@ public class TxForegroundService extends Service {
 
         String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
 
-        // protezione lunghezza SMS
-        if (encoded.length() > 150) {
-            encoded = encoded.substring(0, 150);
+        // ❗ FIX IMPORTANTE: NON troncare brutalmente
+        while (encoded.length() > trackSmsMaxLen && simplified.size() > 2) {
+
+            simplified.remove(simplified.size() - 1);
+
+            polyPoints.clear();
+
+            for (LatLng pt : simplified) {
+                polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+            }
+
+            encoded = PolylineCodec.INSTANCE.encode(polyPoints);
         }
 
         String payload = "T|" + encoded;
@@ -741,8 +650,28 @@ public class TxForegroundService extends Service {
 
         sendTrackSms(sms);
 
-        // pulizia buffer
-        gpsTrackBuffer.clear();
+        // ================================
+        // ROLLING BUFFER (mantieni ultimi punti)
+        // ================================
+
+        synchronized (bufferLock) {
+
+            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+            int keep = Math.min(keepPoints, current.size());
+
+            List<GpsPoint> tail = new ArrayList<>();
+
+            for (int i = current.size() - keep; i < current.size(); i++) {
+                tail.add(current.get(i));
+            }
+
+            gpsTrackBuffer.clear();
+
+            for (GpsPoint gp : tail) {
+                gpsTrackBuffer.addPoint(gp);
+            }
+        }
     }
 
 
@@ -762,6 +691,10 @@ public class TxForegroundService extends Service {
 
             String mode = intent.getStringExtra("MODE");
             if (mode == null) mode = "STANDARD";
+            if ("MULTI_GPS_SMS".equals(mode)) {
+                startMultiGpsMode(intent);
+                return START_STICKY;
+            }
 
             phoneNumber = intent.getStringExtra("phone");
             if (phoneNumber != null) {
@@ -850,7 +783,7 @@ public class TxForegroundService extends Service {
             //logSessionSummary();   // <-- aggiungere
 
             if (multiGpsMode) {
-                flushTrackBuffer();
+                processTrackBuffer();
             }
 
             if (phoneNumber != null && !phoneNumber.isEmpty()) {
@@ -903,6 +836,83 @@ public class TxForegroundService extends Service {
         return START_STICKY;
     }
 
+    private void startMultiGpsMode(Intent intent) {
+
+        String phone = intent.getStringExtra("phone");
+
+        SharedPreferences prefs =
+                getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
+
+        // ================================
+        // 🔥 PARAMETRI MULTI GPS
+        // ================================
+
+        float simplifyTolerance =
+                prefs.getFloat("multi_simplify_tolerance", 0.00005f);
+
+        float minDistanceMeters =
+                prefs.getFloat("multi_min_distance", 10f);
+
+        float angleThreshold =
+                prefs.getFloat("multi_angle_threshold", 10f);
+
+        int maxPointsPerSms =
+                prefs.getInt("multi_max_points_sms", 5);
+
+        long sendIntervalMs =
+                prefs.getLong("multi_send_interval", 15000);
+        int keep =
+                prefs.getInt("multi_keep_points", 3);
+
+        // ================================
+        // LOG DEBUG
+        // ================================
+
+        Log.d("MULTI_GPS_CONFIG",
+                "tol=" + simplifyTolerance +
+                        " dist=" + minDistanceMeters +
+                        " angle=" + angleThreshold +
+                        " maxPts=" + maxPointsPerSms +
+                        " interval=" + sendIntervalMs);
+
+        // ================================
+        // APPLICA AI CAMPI GLOBALI
+        // ================================
+
+        this.trackSimplifyTolerance = simplifyTolerance;
+        this.trackSimplifyDistance = minDistanceMeters;
+        this.trackAngleThreshold = angleThreshold;
+        this.maxPointsPerSms = maxPointsPerSms;
+        this.multiGpsSendIntervalMs = sendIntervalMs;
+
+        int keepPointsPref = prefs.getInt("multi_keep_points", 3);
+        this.keepPoints = keepPointsPref;
+        // ✅ QUI VA IL LOG (POSIZIONE GIUSTA)
+        Log.d("MULTI_GPS_CONFIG",
+                "interval=" + multiGpsSendIntervalMs +
+                        " dist=" + trackSimplifyDistance +
+                        " angle=" + trackAngleThreshold +
+                        " tol=" + trackSimplifyTolerance +
+                        " maxPts=" + maxPointsPerSms +
+                        " keep=" + keepPoints);
+
+        // ================================
+        // AVVIO TRACKING
+        // ================================
+
+        phoneNumber = phone;
+        multiGpsMode = true;
+        continuousMode = false;
+        startMultiGpsTracking();
+
+        if (debugTrackEnabled && !DebugTrackActivity.isOpen) {
+
+            Intent i = new Intent(this, DebugTrackActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        }
+    }
+
     private Notification createNotification() {
 
         NotificationCompat.Builder builder =
@@ -946,7 +956,7 @@ public class TxForegroundService extends Service {
             public void run() {
 
                 // manda solo se abbiamo un valore reale
-                if (lastSignalDbm < 0 && lastSignalDbm > -140) {
+                if (lastSignalDbm <= -50 && lastSignalDbm >= -130) {
                     sendSignalUpdate(lastSignalDbm);
                 }
 
@@ -1046,7 +1056,6 @@ public class TxForegroundService extends Service {
 
     @Override
     public void onCreate() {
-        super.onCreate();
         SharedPreferences prefs =
                 getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
         debugTrackEnabled =
@@ -1059,7 +1068,6 @@ public class TxForegroundService extends Service {
         createNotificationChannel();
         gpsTrackBuffer = new GpsTrackBuffer(this);
         fusedClient = LocationServices.getFusedLocationProviderClient(this);
-        createNotificationChannel();
         startSignalMonitor();     // listener sempre attivo
         startSignalPolling();     // polling base 5 sec
     }
@@ -1177,7 +1185,9 @@ public class TxForegroundService extends Service {
         firstPositionSent = false;
 
         SmsDebugManager.clear();
-        gpsTrackBuffer.clear();
+        synchronized (bufferLock) {
+            gpsTrackBuffer.clear();
+        }
 
         if (isRunning) return;
 
@@ -1196,7 +1206,7 @@ public class TxForegroundService extends Service {
 
         if (multiGpsMode) {
 
-            smsHandler.postDelayed(smsRunnable, trackSmsIntervalMs);
+            trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
 
             return;
         }
@@ -1340,6 +1350,8 @@ public class TxForegroundService extends Service {
 
         // log sempre
         SmsDebugManager.logTx(text);
+        smsSent++;
+        updateUiSmsCounter();
 
         // blocco totale SMS se debug attivo
         if (smsDebugMode) {
@@ -1367,7 +1379,7 @@ public class TxForegroundService extends Service {
 
             smsManager.sendTextMessage(phoneNumber, null, text, null, null);
 
-            smsSent++;
+
 
             Log.d("SMS_TRACK", "SMS inviato");
 
@@ -1616,9 +1628,189 @@ public class TxForegroundService extends Service {
         }
     }
 
+    private void processTrackBuffer() {
+
+        List<GpsPoint> rawPoints;
+
+        synchronized (bufferLock) {
+
+            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+            if (current == null || current.size() < 5) {
+                return;
+            }
+
+            rawPoints = new ArrayList<>(current);
+
+        }
+
+        if (!isRunning || !multiGpsMode || isProcessing) return;
+
+        isProcessing = true;
+        long now = System.currentTimeMillis();
+
+        // 📦 sicurezza minima dati
+        boolean enoughPoints =
+                rawPoints.size() >= 10;
+
+        if (rawPoints.size() < 10) {
+            Log.d("TRACK", "Skip send (not enough points)");
+            isProcessing = false;
+            return;
+        }
+
+
+        // ================================
+        // FILTRO + SEMPLIFICAZIONE
+        // ================================
+
+        List<LatLng> points = new ArrayList<>();
+        LatLng lastKept = null;
+
+        for (GpsPoint gp : rawPoints) {
+
+            LatLng current = new LatLng(gp.getLat(), gp.getLon());
+
+            if (lastKept == null) {
+                points.add(current);
+                lastKept = current;
+                continue;
+            }
+
+            double dist = distanceMeters(
+                    lastKept.latitude,
+                    lastKept.longitude,
+                    current.latitude,
+                    current.longitude
+            );
+
+            if (dist < trackSimplifyDistance) continue;
+
+            if (points.size() >= 2) {
+
+                LatLng prev = points.get(points.size() - 2);
+                LatLng last = points.get(points.size() - 1);
+
+                double angle = angleBetween(prev, last, current);
+
+                if (Math.abs(angle) < trackAngleThreshold) {
+                    points.set(points.size() - 1, current);
+                    lastKept = current;
+                    continue;
+                }
+            }
+
+            points.add(current);
+            lastKept = current;
+        }
+
+        if (points.size() < 3) {
+            isProcessing = false;
+            return;
+        }
+        List<LatLng> simplified =
+                TrackSimplifier.simplify(points, trackSimplifyTolerance);
+
+        if (simplified.size() < 2) {
+            isProcessing = false;
+            return;
+        }
+        // ================================
+        // ENCODING
+        // ================================
+
+        List<Pair<Double, Double>> polyPoints = new ArrayList<>();
+
+        for (LatLng pt : simplified) {
+            polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+        }
+
+        String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+
+        while (encoded.length() > trackSmsMaxLen && simplified.size() > 2) {
+
+            simplified.remove(simplified.size() - 1);
+
+            polyPoints.clear();
+
+            for (LatLng pt : simplified) {
+                polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+            }
+
+            encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+        }
+
+        // 🔴 LIMIT SMS
+        if (smsSent >= maxSmsPerSession) {
+
+            Log.d("TRACK", "Max SMS reached → STOP");
+
+            stopTrackingInternal();
+            isProcessing = false;
+            return;
+        }
+
+        String payload = "T|" + encoded;
+        String crc = SmsCrc.INSTANCE.crc8(payload);
+        String sms = payload + "|" + crc;
+
+        sendTrackSms(sms);
+        lastTrackSmsTime = now;
+
+        // ================================
+        // ROLLING BUFFER
+        // ================================
+
+        synchronized (bufferLock) {
+
+            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+            int keep = Math.min(keepPoints, current.size());
+
+            List<GpsPoint> tail = new ArrayList<>();
+
+            for (int i = current.size() - keep; i < current.size(); i++) {
+                tail.add(current.get(i));
+            }
+
+            gpsTrackBuffer.clear();
+
+            for (GpsPoint gp : tail) {
+                gpsTrackBuffer.addPoint(gp);
+            }
+        }
+        isProcessing = false;
+        if (debugTrackEnabled && DebugTrackActivity.isOpen) {
+
+            DebugTrackStore.raw = convertGpsPointsToLatLng(rawPoints);
+            DebugTrackStore.filtered = new ArrayList<>(points);
+            DebugTrackStore.simplified = new ArrayList<>(simplified);
+
+            DebugTrackStore.rawCount = rawPoints.size();
+            DebugTrackStore.filteredCount = points.size();
+            DebugTrackStore.simplifiedCount = simplified.size();
+            DebugTrackStore.smsLength = sms.length();
+            DebugTrackStore.lastSms = sms;
+        }
+    }
+
+    private List<LatLng> convertGpsPointsToLatLng(List<GpsPoint> list) {
+
+        List<LatLng> out = new ArrayList<>();
+
+        for (GpsPoint p : list) {
+            out.add(new LatLng(p.getLat(), p.getLon()));
+        }
+
+        return out;
+    }
+
     private void stopTrackingInternal() {
 
-        gpsTrackBuffer.clear();
+        trackHandler.removeCallbacks(trackProcessorRunnable);
+        synchronized (bufferLock) {
+            gpsTrackBuffer.clear();
+        }
         lastTrackSmsTime = 0;
 
         if (!isRunning) return;

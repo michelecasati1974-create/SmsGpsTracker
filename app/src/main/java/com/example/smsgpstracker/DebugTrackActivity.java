@@ -12,6 +12,8 @@ import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
 import com.google.android.gms.maps.model.PolylineOptions;
+import android.os.Handler;
+import android.widget.TextView;
 
 
 
@@ -19,14 +21,21 @@ public class DebugTrackActivity extends AppCompatActivity
         implements OnMapReadyCallback {
     public static boolean isOpen = false;
     private GoogleMap map;
+    private TextView statsView;
+    private Handler handler = new Handler();
+
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_debug_track);
+
         isOpen = true;
 
-        setContentView(R.layout.activity_debug_track);
+        statsView = findViewById(R.id.stats);
+
+        startStatsUpdater();
 
         SupportMapFragment mapFragment =
                 (SupportMapFragment) getSupportFragmentManager()
@@ -35,6 +44,40 @@ public class DebugTrackActivity extends AppCompatActivity
         if (mapFragment != null) {
             mapFragment.getMapAsync(this);
         }
+    }
+
+    private void startStatsUpdater() {
+
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+
+                updateStats();
+
+                if (map != null) {
+                    refreshMap();
+                }
+
+                handler.postDelayed(this, 1000);
+            }
+        }, 1000);
+    }
+
+    private void updateStats() {
+
+        String text =
+                "RAW: " + DebugTrackStore.rawCount + "\n" +
+                        "FILTER: " + DebugTrackStore.filteredCount + "\n" +
+                        "SIMPL: " + DebugTrackStore.simplifiedCount + "\n" +
+                        "SMS LEN: " + DebugTrackStore.smsLength + "\n" +
+                        "SMS: " + DebugTrackStore.lastSms;
+
+        statsView.setText(text);
+    }
+
+    private void refreshMap() {
+        map.clear();
+        loadTrack();
     }
 
     @Override

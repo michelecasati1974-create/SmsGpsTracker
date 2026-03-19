@@ -55,8 +55,11 @@ class TxActivity : AppCompatActivity() {
     private var currentStatus = TxStatus.IDLE
     private var rxStatus = RxRemoteStatus.UNKNOWN
     private lateinit var switchNoSignalAlert: Switch
+
+    private lateinit var btnMultiGpsSettings: Button
     enum class TxStatus { IDLE, WAITING, TRACKING }
     enum class RxRemoteStatus { UNKNOWN, ALIVE, LOST }
+
 
 
 
@@ -255,6 +258,7 @@ class TxActivity : AppCompatActivity() {
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
         btnSettings = findViewById(R.id.btnSettings)
+        btnMultiGpsSettings = findViewById(R.id.btnMultiGpsSettings)
         btnForcePosition = findViewById(R.id.btnForcePosition)
         switchNoSignalAlert = findViewById(R.id.switchNoSignalAlert)
         switchMultiGpsSms = findViewById(R.id.switchMultiGpsSms)
@@ -271,11 +275,14 @@ class TxActivity : AppCompatActivity() {
 
             multiGpsMode = isChecked
 
+            // 🔥 ABILITA/DISABILITA PULSANTE SETTINGS MULTI GPS
+            btnMultiGpsSettings.isEnabled = isChecked
+            btnMultiGpsSettings.alpha = if (isChecked) 1f else 0.4f
+
             if (isChecked) {
 
                 Log.d("TX_MODE", "MULTI GPS SMS MODE")
 
-                // disabilita modalità classiche
                 switchContinuousMode.isEnabled = false
                 edtMaxSms.isEnabled = false
                 edtInterval.isEnabled = false
@@ -284,7 +291,6 @@ class TxActivity : AppCompatActivity() {
 
                 Log.d("TX_MODE", "STANDARD SMS MODE")
 
-                // riabilita modalità classiche
                 switchContinuousMode.isEnabled = true
                 edtInterval.isEnabled = true
 
@@ -293,6 +299,9 @@ class TxActivity : AppCompatActivity() {
                 }
             }
         }
+
+        btnMultiGpsSettings.isEnabled = switchMultiGpsSms.isChecked
+        btnMultiGpsSettings.alpha = if (switchMultiGpsSms.isChecked) 1f else 0.4f
 
         signalBars = listOf(
             findViewById(R.id.s1),
@@ -357,6 +366,12 @@ class TxActivity : AppCompatActivity() {
         }
 
         btnSettings.setOnClickListener {
+
+            btnMultiGpsSettings.setOnClickListener {
+
+                val intent = Intent(this, MultiGpsSettingsActivity::class.java)
+                startActivity(intent)
+            }
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         switchFastMonitor = findViewById(R.id.switchFastMonitor)
@@ -400,11 +415,17 @@ class TxActivity : AppCompatActivity() {
         val phone = prefs.getString(KEY_PHONE, null)
 
         if (phone.isNullOrBlank()) {
-            Toast.makeText(this,
+            Toast.makeText(
+                this,
                 "Numero RX non configurato in Settings",
-                Toast.LENGTH_LONG).show()
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
+
+        // 🔥 DISABILITA SETTINGS MULTI GPS DURANTE TRACKING
+        btnMultiGpsSettings.isEnabled = false
+        btnMultiGpsSettings.alpha = 0.4f
 
         val intent = Intent(this, TxForegroundService::class.java).apply {
             action = TxForegroundService.ACTION_START
