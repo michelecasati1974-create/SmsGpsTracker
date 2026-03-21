@@ -4,6 +4,7 @@ import com.google.android.gms.maps.model.LatLng;
 import java.util.ArrayList;
 import java.util.List;
 
+
 public class TrackSimplifier {
 
     public static List<LatLng> simplify(List<LatLng> points, double epsilon) {

@@ -23,6 +23,8 @@ public class DebugTrackActivity extends AppCompatActivity
     private GoogleMap map;
     private TextView statsView;
     private Handler handler = new Handler();
+    private boolean firstDraw = true;
+    private boolean cameraMoved = false;
 
 
 
@@ -55,7 +57,9 @@ public class DebugTrackActivity extends AppCompatActivity
                 updateStats();
 
                 if (map != null) {
-                    refreshMap();
+                    if (DebugTrackStore.rawCount % 10 == 0) {
+                        refreshMap();
+                    }
                 }
 
                 handler.postDelayed(this, 1000);
@@ -76,8 +80,16 @@ public class DebugTrackActivity extends AppCompatActivity
     }
 
     private void refreshMap() {
-        map.clear();
-        loadTrack();
+
+        if (map == null) return;
+
+        if (firstDraw) {
+            map.clear();
+            loadTrack();
+            firstDraw = false;
+        } else {
+            loadTrack(); // senza clear
+        }
     }
 
     @Override
@@ -163,18 +175,18 @@ public class DebugTrackActivity extends AppCompatActivity
 
     private void moveCamera() {
 
-        if (map == null) return;
+        if (map == null || cameraMoved) return;
 
         if (DebugTrackStore.raw == null ||
-                DebugTrackStore.raw.isEmpty()) {
-            return;
-        }
+                DebugTrackStore.raw.isEmpty()) return;
 
         LatLng first = DebugTrackStore.raw.get(0);
 
         map.moveCamera(
                 CameraUpdateFactory.newLatLngZoom(first, 17f)
         );
+
+        cameraMoved = true;
     }
 
     @Override

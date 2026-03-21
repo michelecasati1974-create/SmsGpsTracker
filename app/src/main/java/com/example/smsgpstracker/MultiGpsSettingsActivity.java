@@ -8,20 +8,25 @@ import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.EditText;
+import android.util.Log;
 
 
 public class MultiGpsSettingsActivity extends AppCompatActivity {
 
     private SharedPreferences prefs;
 
+
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Log.d("TEST", "APP AVVIATA");
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_multi_gps_settings);
 
         prefs = getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
 
         setupFields();
+        Log.d("TEST_UI", "onCreate chiamato");
     }
 
     private void setupFields() {
@@ -47,7 +52,7 @@ public class MultiGpsSettingsActivity extends AppCompatActivity {
                 prefs.getFloat("multi_simplify_tolerance", 0.00005f)));
 
         edtMinPoints.setText(String.valueOf(
-                prefs.getInt("multi_max_points_sms", 5)));
+                prefs.getInt("multi_min_points", 5)));
 
         edtKeep.setText(String.valueOf(
                 prefs.getInt("multi_keep_points", 2)));
@@ -69,7 +74,7 @@ public class MultiGpsSettingsActivity extends AppCompatActivity {
                     .putFloat("multi_simplify_tolerance",
                             Float.parseFloat(edtEpsilon.getText().toString()))
 
-                    .putInt("multi_max_points_sms",
+                    .putInt("multi_min_points",
                             Integer.parseInt(edtMinPoints.getText().toString()))
 
                     .putInt("multi_keep_points",
@@ -78,6 +83,13 @@ public class MultiGpsSettingsActivity extends AppCompatActivity {
                     .apply();
 
             finish();
+            Log.d("TEST_UI", "interval=" + prefs.getLong("multi_send_interval", -1));
+            Log.d("TEST_UI", "distance=" + prefs.getFloat("multi_min_distance", -1));
+            Log.d("TEST_UI", "angle=" + prefs.getFloat("multi_angle_threshold", -1));
+            Log.d("TEST_UI", "epsilon=" + prefs.getFloat("multi_simplify_tolerance", -1));
+            Log.d("TEST_UI", "minPoints=" + prefs.getInt("multi_min_points", -1));
+            Log.d("TEST_UI", "keep=" + prefs.getInt("multi_keep_points", -1));
         });
+        Log.d("TEST_UI", "onCreate chiamato");
     }
 }

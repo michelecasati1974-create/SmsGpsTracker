@@ -67,6 +67,7 @@ public class TxForegroundService extends Service {
 
     private boolean debugTrackEnabled;
 
+
     private HighFrequencyTracker highFrequencyTracker = new HighFrequencyTracker();
     private SequenceManager sequenceManager = new SequenceManager();
     private Runnable uiRunnable;
@@ -82,6 +83,7 @@ public class TxForegroundService extends Service {
     private boolean gpsFixValid = false;
     private boolean continuousMode = false;
     private boolean multiGpsMode = false;
+    private boolean autoModeEnabled = true;
 
     private static final float MOVEMENT_DISTANCE_METERS = 5f;
     private static final long STOP_TIMEOUT_MS = 120000; // 2 minuti
@@ -113,6 +115,8 @@ public class TxForegroundService extends Service {
 
     private Location lastDistanceLocation = null;
     private final Object bufferLock = new Object();
+    private long multiSendIntervalMs;
+
 
 
 
@@ -149,7 +153,24 @@ public class TxForegroundService extends Service {
     ////////////////////////////////////////////////////
 
     private SharedPreferences statePrefs;
+    private AdaptiveConfig adaptiveConfig;
+    private AdaptiveConfig lastAdaptiveConfig = null;
+    private AdaptiveConfig currentConfig;
 
+    private int estimateSmsLength(List<LatLng> points) {
+
+        if (points == null || points.isEmpty()) return 0;
+
+        List<Pair<Double, Double>> polyPoints = new ArrayList<>();
+
+        for (LatLng pt : points) {
+            polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+        }
+
+        String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+
+        return encoded.length() + 5; // margine sicurezza
+    }
 
 
 
@@ -160,6 +181,12 @@ public class TxForegroundService extends Service {
         Log.d("TX_SERVICE", "startMultiGpsTracking()");
 
         startTracking();
+        AdaptiveConfig config = new AdaptiveConfig(
+                trackSimplifyDistance,
+                trackAngleThreshold,
+                trackSimplifyTolerance,
+                multiSendIntervalMs
+        );
     }
 
     private void startIntervalTracking() {
@@ -620,6 +647,7 @@ public class TxForegroundService extends Service {
         // POLYLINE ENCODE
         // ================================
 
+
         List<Pair<Double, Double>> polyPoints = new ArrayList<>();
 
         for (LatLng pt : simplified) {
@@ -640,6 +668,21 @@ public class TxForegroundService extends Service {
             }
 
             encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+        }
+
+        int estimatedLen = encoded.length() + 5;
+
+        long now = System.currentTimeMillis();
+        boolean isNearLimit = estimatedLen >= (trackSmsMaxLen - 10);
+        boolean timeoutReached = (now - lastTrackSmsTime) >= multiSendIntervalMs;
+
+        // 🔴 BLOCCA INVIO SE NON SERVE
+        if (!isNearLimit && !timeoutReached) {
+
+            Log.d("TRACK", "WAIT → fill SMS (" + estimatedLen + " chars)");
+
+            isProcessing = false;
+            return;
         }
 
         String payload = "T|" + encoded;
@@ -782,7 +825,7 @@ public class TxForegroundService extends Service {
 
             //logSessionSummary();   // <-- aggiungere
 
-            if (multiGpsMode) {
+            if (multiGpsMode && gpsTrackBuffer.count() >= 5) {
                 processTrackBuffer();
             }
 
@@ -791,7 +834,58 @@ public class TxForegroundService extends Service {
             }
 
             sessionEndTime = System.currentTimeMillis();
+
+
+
             saveSmsLog();
+            if (autoModeEnabled) {
+
+                // 🔒 sicurezza base (evita divisioni per zero)
+                if (gpsPointsCollected == 0 || smsSent == 0) {
+                    Log.d("ADAPTIVE", "Skip (no data)");
+                } else {
+
+                    AdaptiveSession session = new AdaptiveSession();
+
+                    session.gpsPoints = gpsPointsCollected;
+                    session.smsSent = smsSent;
+                    session.distanceKm = totalDistanceMeters / 1000.0;
+                    session.avgAccuracy = accuracyCount > 0 ? accuracySum / accuracyCount : 0;
+                    session.durationSec = (sessionEndTime - sessionStartTime) / 1000;
+
+                    session.distanceParam = trackSimplifyDistance;
+                    session.angleParam = trackAngleThreshold;
+                    session.epsilonParam = trackSimplifyTolerance;
+                    session.intervalParam = multiSendIntervalMs;
+
+                    session.compressionRatio =
+                            (double) smsSent / (double) gpsPointsCollected;
+
+                    AdaptiveConfig current = currentConfig;
+
+                    AdaptiveConfig newConfig = null;
+
+                    try {
+                        newConfig = AdaptiveEngine.adjust(currentConfig, session);
+                    } catch (Exception e) {
+                        Log.e("ADAPTIVE", "Adjust error", e);
+                    }
+
+                    // 🔥 APPLICA SOLO SE VALIDA
+                    if (newConfig != null) {
+
+                        applyAdaptiveConfig(newConfig);
+
+                        // 🔥 salva anche per SESSION REPORT
+                        lastAdaptiveConfig = newConfig;
+
+                        saveAdaptiveReport(session, newConfig);
+
+                    } else {
+                        Log.d("ADAPTIVE", "No new config applied");
+                    }
+                }
+            }
             saveTxState("IDLE");
 
             stopTrackingInternal();
@@ -844,8 +938,8 @@ public class TxForegroundService extends Service {
                 getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
 
         // ================================
-        // 🔥 PARAMETRI MULTI GPS
-        // ================================
+// 🔥 PARAMETRI MULTI GPS
+// ================================
 
         float simplifyTolerance =
                 prefs.getFloat("multi_simplify_tolerance", 0.00005f);
@@ -861,8 +955,27 @@ public class TxForegroundService extends Service {
 
         long sendIntervalMs =
                 prefs.getLong("multi_send_interval", 15000);
+
+        multiSendIntervalMs = sendIntervalMs;
+
+        autoModeEnabled =
+                prefs.getBoolean("auto_mode_enabled", true);
+
         int keep =
                 prefs.getInt("multi_keep_points", 3);
+
+
+        // ================================
+        // 🔥 INIT ADAPTIVE CONFIG
+        // ================================
+
+        currentConfig = new AdaptiveConfig(
+                minDistanceMeters,
+                angleThreshold,
+                simplifyTolerance,
+                multiSendIntervalMs
+        );
+        Log.d("ADAPTIVE", "AUTO MODE = " + autoModeEnabled);
 
         // ================================
         // LOG DEBUG
@@ -1607,6 +1720,40 @@ public class TxForegroundService extends Service {
                     compression
             ));
 
+            writer.write("\n--- MULTI GPS PARAMS ---\n");
+
+            writer.write("Send interval (ms): " + multiSendIntervalMs + "\n");
+            writer.write("Min distance (m): " + trackSimplifyDistance + "\n");
+            writer.write("Angle threshold (deg): " + trackAngleThreshold + "\n");
+            writer.write("Simplify tolerance: " + trackSimplifyTolerance + "\n");
+            writer.write("Max points per SMS: " + maxPointsPerSms + "\n");
+            writer.write("Keep points: " + keepPoints + "\n");
+            writer.write("\n--- AUTO MODE ---\n");
+
+            if (debugTrackEnabled) {
+
+                writer.write("\n--- DEBUG TRACK ---\n");
+
+                writer.write("RAW points: " + DebugTrackStore.rawCount + "\n");
+                writer.write("FILTERED points: " + DebugTrackStore.filteredCount + "\n");
+                writer.write("SIMPLIFIED points: " + DebugTrackStore.simplifiedCount + "\n");
+
+                writer.write("Last SMS length: " + DebugTrackStore.smsLength + "\n");
+            }
+
+            writer.write("\n--- AUTO MODE ---\n");
+
+            writer.write("Enabled: " + autoModeEnabled + "\n");
+
+            if (autoModeEnabled && lastAdaptiveConfig != null) {
+
+                writer.write("New interval (ms): " + lastAdaptiveConfig.intervalMs + "\n");
+                writer.write("New distance (m): " + lastAdaptiveConfig.distance + "\n");
+                writer.write("New angle (deg): " + lastAdaptiveConfig.angle + "\n");
+                writer.write("New epsilon: " + lastAdaptiveConfig.epsilon + "\n");
+                writer.write("New config: " + lastAdaptiveConfig + "\n");
+            }
+
             writer.write("\n=========================\n\n");
 
             // =========================
@@ -1626,6 +1773,54 @@ public class TxForegroundService extends Service {
             Log.e("SMS_DEBUG", "Errore salvataggio file", e);
 
         }
+        if (autoModeEnabled) {
+
+            AdaptiveSession session = new AdaptiveSession();
+
+            session.gpsPoints = gpsPointsCollected;
+            session.smsSent = smsSent;
+            session.distanceKm = totalDistanceMeters / 1000.0;
+            session.avgAccuracy = accuracyCount > 0 ? accuracySum / accuracyCount : 0;
+            session.durationSec = (sessionEndTime - sessionStartTime) / 1000;
+
+            session.distanceParam = trackSimplifyDistance;
+            session.angleParam = trackAngleThreshold;
+            session.epsilonParam = trackSimplifyTolerance;
+            session.intervalParam = multiSendIntervalMs;
+
+            session.compressionRatio =
+                    (double) smsSent / (double) gpsPointsCollected;
+
+            AdaptiveStore.saveSession(this, session);
+
+            if (autoModeEnabled) {
+
+                if (currentConfig != null && session != null) {
+
+                    AdaptiveConfig newConfig =
+                            AdaptiveEngine.adjust(currentConfig, session);
+
+                    if (newConfig != null) {
+                        applyAdaptiveConfig(newConfig);
+                    }
+                }
+
+            } else {
+                Log.d("ADAPTIVE", "AUTO MODE OFF → config invariata");
+            }
+        }
+    }
+
+    private void applyAdaptiveConfig(AdaptiveConfig c) {
+
+        if (c == null) return;
+
+        trackSimplifyDistance = c.distance;
+        trackAngleThreshold = c.angle;
+        trackSimplifyTolerance = c.epsilon;
+        multiSendIntervalMs = c.intervalMs;
+
+        Log.d("ADAPTIVE", "Applied new config");
     }
 
     private void processTrackBuffer() {
@@ -1992,6 +2187,86 @@ public class TxForegroundService extends Service {
         intent.putExtra("signalDbm", dbm);
 
         sendBroadcast(intent);
+    }
+    private void saveAdaptiveReport(AdaptiveSession session, AdaptiveConfig newConfig) {
+
+        try {
+
+            File folder = new File(
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOCUMENTS),
+                    "SmsGpsTracker"
+            );
+
+            if (!folder.exists()) {
+                folder.mkdirs();
+            }
+
+            String timestamp = new SimpleDateFormat(
+                    "yyyy-MM-dd_HH-mm-ss",
+                    Locale.getDefault()
+            ).format(new Date());
+
+            File file = new File(folder, "adaptive_" + timestamp + ".txt");
+
+            FileWriter writer = new FileWriter(file);
+
+            // =========================
+            // HEADER
+            // =========================
+
+            writer.write("===== ADAPTIVE REPORT =====\n\n");
+
+            // =========================
+            // SESSION INFO
+            // =========================
+
+            writer.write("GPS points: " + session.gpsPoints + "\n");
+            writer.write("SMS sent: " + session.smsSent + "\n");
+            writer.write(String.format("Distance: %.2f km\n", session.distanceKm));
+            writer.write(String.format("Avg accuracy: %.1f m\n", session.avgAccuracy));
+            writer.write("Duration: " + session.durationSec + " sec\n");
+
+            writer.write("\n");
+
+            writer.write(String.format("Compression ratio: %.5f\n",
+                    session.compressionRatio));
+
+            writer.write("\n=========================\n\n");
+
+            // =========================
+            // CONFIG USATA
+            // =========================
+
+            writer.write("=== CONFIG USED ===\n");
+
+            writer.write("Distance: " + session.distanceParam + "\n");
+            writer.write("Angle: " + session.angleParam + "\n");
+            writer.write("Epsilon: " + session.epsilonParam + "\n");
+            writer.write("Interval: " + session.intervalParam + "\n");
+
+            writer.write("\n");
+
+            // =========================
+            // CONFIG NUOVA
+            // =========================
+
+            writer.write("=== NEW CONFIG ===\n");
+
+            writer.write("Distance: " + newConfig.distance + "\n");
+            writer.write("Angle: " + newConfig.angle + "\n");
+            writer.write("Epsilon: " + newConfig.epsilon + "\n");
+            writer.write("Interval: " + newConfig.intervalMs + "\n");
+
+            writer.write("\n=========================\n");
+
+            writer.close();
+
+            Log.d("ADAPTIVE_FILE", "Report salvato: " + file.getAbsolutePath());
+
+        } catch (Exception e) {
+            Log.e("ADAPTIVE_FILE", "Errore salvataggio report", e);
+        }
     }
 
 

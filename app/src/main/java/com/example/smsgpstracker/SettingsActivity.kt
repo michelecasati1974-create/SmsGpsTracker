@@ -9,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import android.text.method.PasswordTransformationMethod
 import android.text.method.HideReturnsTransformationMethod
 import android.widget.Switch
+import android.content.Intent
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -25,6 +26,12 @@ class SettingsActivity : AppCompatActivity() {
 
     private lateinit var edtNoSignalTc: EditText
     private lateinit var edtVibrationTs: EditText
+    private lateinit var switchAutoMode: Switch
+
+    private lateinit var btnTrainGpx: Button
+
+
+
 
     companion object {
         private const val KEY_DEBUG_TRACK = "debug_track"
@@ -39,7 +46,15 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_activity)
 
+        val btnMultiGps = findViewById<Button>(R.id.btnMultiGpsSettings)
+
+        btnMultiGps.setOnClickListener {
+            val intent = Intent(this, MultiGpsSettingsActivity::class.java)
+            startActivity(intent)
+        }
+
         // Bind UI
+        switchAutoMode = findViewById(R.id.switchAutoMode)
         switchDebugTrack = findViewById<Switch>(R.id.switchDebugTrack)
         edtPhoneRx = findViewById(R.id.edtPhoneRx)
         edtSignalThreshold = findViewById(R.id.edtSignalThreshold)
@@ -50,6 +65,7 @@ class SettingsActivity : AppCompatActivity() {
         edtNoSignalTc = findViewById(R.id.edtNoSignalTc)
         edtVibrationTs = findViewById(R.id.edtVibrationTs)
 
+
         // UNA sola SharedPreferences
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
 
@@ -59,6 +75,23 @@ class SettingsActivity : AppCompatActivity() {
 
         edtNoSignalTc.setText(savedTc.toString())
         edtVibrationTs.setText(savedTs.toString())
+
+        btnTrainGpx = findViewById(R.id.btnTrainGpx)
+
+        btnTrainGpx.setOnClickListener {
+
+            Thread {
+                GpxTrainingManager.runTraining(this)
+
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Training completato",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }.start()
+        }
 
         loadSettings()
 
@@ -91,6 +124,9 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun loadSettings() {
+
+        switchAutoMode.isChecked =
+            prefs.getBoolean("auto_mode_enabled", true)
 
         switchDebugTrack.isChecked =
             prefs.getBoolean(KEY_DEBUG_TRACK, false)
@@ -128,6 +164,7 @@ class SettingsActivity : AppCompatActivity() {
         val timeout = edtTimeoutFactor.text.toString().toFloatOrNull()
         prefs.edit()
             .putBoolean(KEY_DEBUG_TRACK, switchDebugTrack.isChecked)
+            .putBoolean("auto_mode_enabled", switchAutoMode.isChecked)
             .apply()
 
         var isValid = true
