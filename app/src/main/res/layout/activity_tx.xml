@@ -43,6 +43,12 @@
                 android:layout_marginTop="12dp"/>
 
             <Switch
+                android:id="@+id/switchSmsDebug"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SMS Debug Mode"/>
+
+            <Switch
                 android:id="@+id/switchContinuousMode"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -337,11 +343,14 @@
                 android:layout_height="wrap_content"
                 android:enabled="false"/>
 
-            <Switch
-                android:id="@+id/switchSmsDebug"
-                android:layout_width="wrap_content"
+            <Button
+                android:id="@+id/btnCloseApp"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="SMS Debug Mode"/>
+                android:text="TERMINA APP"
+                android:layout_marginTop="12dp"/>
+
+
 
         </LinearLayout>
 

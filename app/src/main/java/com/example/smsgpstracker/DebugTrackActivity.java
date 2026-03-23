@@ -56,10 +56,8 @@ public class DebugTrackActivity extends AppCompatActivity
 
                 updateStats();
 
-                if (map != null) {
-                    if (DebugTrackStore.rawCount % 10 == 0) {
-                        refreshMap();
-                    }
+                if (DebugTrackStore.rawCount > 0) {
+                    refreshMap();
                 }
 
                 handler.postDelayed(this, 1000);
@@ -83,13 +81,9 @@ public class DebugTrackActivity extends AppCompatActivity
 
         if (map == null) return;
 
-        if (firstDraw) {
-            map.clear();
-            loadTrack();
-            firstDraw = false;
-        } else {
-            loadTrack(); // senza clear
-        }
+        map.clear(); // 🔥 SEMPRE
+
+        loadTrack();
     }
 
     @Override
@@ -175,18 +169,18 @@ public class DebugTrackActivity extends AppCompatActivity
 
     private void moveCamera() {
 
-        if (map == null || cameraMoved) return;
+        if (map == null) return;
 
         if (DebugTrackStore.raw == null ||
                 DebugTrackStore.raw.isEmpty()) return;
 
-        LatLng first = DebugTrackStore.raw.get(0);
-
-        map.moveCamera(
-                CameraUpdateFactory.newLatLngZoom(first, 17f)
+        LatLng last = DebugTrackStore.raw.get(
+                DebugTrackStore.raw.size() - 1
         );
 
-        cameraMoved = true;
+        map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(last, 17f)
+        );
     }
 
     @Override

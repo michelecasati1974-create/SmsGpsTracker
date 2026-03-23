@@ -174,7 +174,8 @@ class TxActivity : AppCompatActivity() {
         switchFastMonitor.isEnabled = !isRunning
 
         if (isRunning) {
-            switchFastMonitor.isChecked = false
+
+            // ❌ NON toccare isChecked → mantieni stato utente
 
             if (status == TxStatus.IDLE) {
                 txtTimer.text = "00:00"
@@ -347,9 +348,7 @@ class TxActivity : AppCompatActivity() {
             Log.d("TX_UI", "STOP BUTTON CLICKED")
 
             btnStartTx.isEnabled = true
-            btnStartTx.alpha = 1f
             btnStopTx.isEnabled = false
-            btnStopTx.alpha = 0.5f
 
             stopTxService() }
         btnForcePosition = findViewById(R.id.btnForcePosition)
@@ -365,13 +364,36 @@ class TxActivity : AppCompatActivity() {
             startService(intent)
         }
 
+        btnMultiGpsSettings.setOnClickListener {
+
+            val intent = Intent(this, MultiGpsSettingsActivity::class.java)
+            startActivity(intent)
+        }
+
+        val btnCloseApp = findViewById<Button>(R.id.btnCloseApp)
+
+        btnCloseApp.setOnClickListener {
+
+            Log.d("APP", "CHIUSURA FORZATA UTENTE")
+
+            // 1. STOP SERVIZIO
+            val stopIntent = Intent(this, TxForegroundService::class.java).apply {
+                action = TxForegroundService.ACTION_STOP
+            }
+            startService(stopIntent)
+
+            // 2. reset stato (opzionale ma consigliato)
+            getSharedPreferences("tx_state_prefs", MODE_PRIVATE)
+                .edit()
+                .putString("tx_state", "IDLE")
+                .apply()
+
+            // 3. chiude tutta l'app
+            finishAffinity()
+        }
+
         btnSettings.setOnClickListener {
 
-            btnMultiGpsSettings.setOnClickListener {
-
-                val intent = Intent(this, MultiGpsSettingsActivity::class.java)
-                startActivity(intent)
-            }
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         switchFastMonitor = findViewById(R.id.switchFastMonitor)
@@ -379,8 +401,7 @@ class TxActivity : AppCompatActivity() {
         switchFastMonitor.setOnCheckedChangeListener { _, isChecked ->
 
             if (currentStatus != TxStatus.IDLE) {
-                switchFastMonitor.isChecked = false
-                return@setOnCheckedChangeListener
+                return@setOnCheckedChangeListener   // ✅ NON cambiare stato
             }
 
             val intent = Intent(this, TxForegroundService::class.java).apply {
@@ -608,18 +629,18 @@ class TxActivity : AppCompatActivity() {
         if (state == "TRACKING") {
 
             btnStartTx.isEnabled = false
-            btnStartTx.alpha = 0.5f
+
 
             btnStopTx.isEnabled = true
-            btnStopTx.alpha = 1f
+
 
         } else {
 
             btnStartTx.isEnabled = true
-            btnStartTx.alpha = 1f
+
 
             btnStopTx.isEnabled = false
-            btnStopTx.alpha = 0.5f
+
         }
     }
 

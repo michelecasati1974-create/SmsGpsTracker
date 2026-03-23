@@ -1626,6 +1626,54 @@ public class TxForegroundService extends Service {
 
         try {
 
+            // =========================
+            // 🔥 AUTO MODE → CALCOLO PRIMA
+            // =========================
+
+            AdaptiveSession session = null;
+
+            if (autoModeEnabled && gpsPointsCollected > 0) {
+
+                session = new AdaptiveSession();
+
+                session.gpsPoints = gpsPointsCollected;
+                session.smsSent = smsSent;
+                session.distanceKm = totalDistanceMeters / 1000.0;
+                session.avgAccuracy = accuracyCount > 0 ? accuracySum / accuracyCount : 0;
+                session.durationSec = (sessionEndTime - sessionStartTime) / 1000;
+
+                session.distanceParam = trackSimplifyDistance;
+                session.angleParam = trackAngleThreshold;
+                session.epsilonParam = trackSimplifyTolerance;
+                session.intervalParam = multiSendIntervalMs;
+
+                session.compressionRatio =
+                        (double) smsSent / (double) gpsPointsCollected;
+
+                AdaptiveStore.saveSession(this, session);
+
+                if (currentConfig != null) {
+
+                    AdaptiveConfig newConfig =
+                            AdaptiveEngine.adjust(currentConfig, session);
+
+                    if (newConfig != null) {
+
+                        // 🔥 SALVA PER REPORT
+                        lastAdaptiveConfig = newConfig;
+
+                        // 🔥 APPLICA NUOVA CONFIG
+                        applyAdaptiveConfig(newConfig);
+
+                        Log.d("ADAPTIVE", "NEW CONFIG: " + newConfig);
+                    }
+                }
+            }
+
+            // =========================
+            // 📁 CREAZIONE FILE
+            // =========================
+
             File folder = new File(
                     Environment.getExternalStoragePublicDirectory(
                             Environment.DIRECTORY_DOCUMENTS),
@@ -1646,11 +1694,10 @@ public class TxForegroundService extends Service {
             FileWriter writer = new FileWriter(file);
 
             // =========================
-            // CALCOLI STATISTICHE
+            // 📊 STATISTICHE
             // =========================
 
             long durationMs = sessionEndTime - sessionStartTime;
-
             long durationSec = durationMs / 1000;
 
             long minutes = durationSec / 60;
@@ -1659,7 +1706,6 @@ public class TxForegroundService extends Service {
             double distanceKm = totalDistanceMeters / 1000.0;
 
             float avgAccuracy = 0;
-
             if (accuracyCount > 0) {
                 avgAccuracy = accuracySum / accuracyCount;
             }
@@ -1667,13 +1713,11 @@ public class TxForegroundService extends Service {
             int logEntries = SmsDebugManager.getLogs().size();
 
             float compression = 0;
-
             if (gpsPointsCollected > 0) {
                 compression = (float) smsSent / (float) gpsPointsCollected;
             }
 
             String mode;
-
             if (multiGpsMode)
                 mode = "MULTI_GPS";
             else if (continuousMode)
@@ -1682,7 +1726,7 @@ public class TxForegroundService extends Service {
                 mode = "STANDARD";
 
             // =========================
-            // SESSION STATS
+            // 🧾 SESSION STATS
             // =========================
 
             writer.write("===== SESSION STATS =====\n\n");
@@ -1698,7 +1742,6 @@ public class TxForegroundService extends Service {
             writer.write("\n");
 
             writer.write("SMS sent: " + smsSent + "\n");
-
             writer.write("Log entries: " + logEntries + "\n");
 
             writer.write("\n");
@@ -1720,6 +1763,10 @@ public class TxForegroundService extends Service {
                     compression
             ));
 
+            // =========================
+            // ⚙️ PARAMETRI MULTI GPS
+            // =========================
+
             writer.write("\n--- MULTI GPS PARAMS ---\n");
 
             writer.write("Send interval (ms): " + multiSendIntervalMs + "\n");
@@ -1728,7 +1775,42 @@ public class TxForegroundService extends Service {
             writer.write("Simplify tolerance: " + trackSimplifyTolerance + "\n");
             writer.write("Max points per SMS: " + maxPointsPerSms + "\n");
             writer.write("Keep points: " + keepPoints + "\n");
+
+            // =========================
+            // 🧠 AUTO MODE
+            // =========================
+
             writer.write("\n--- AUTO MODE ---\n");
+            writer.write("Enabled: " + autoModeEnabled + "\n");
+
+            if (autoModeEnabled) {
+
+                if (session != null) {
+
+                    writer.write("\nSession ratio: " + session.compressionRatio + "\n");
+
+                    writer.write("Prev interval: " + session.intervalParam + "\n");
+                    writer.write("Prev distance: " + session.distanceParam + "\n");
+                    writer.write("Prev angle: " + session.angleParam + "\n");
+                    writer.write("Prev epsilon: " + session.epsilonParam + "\n");
+                }
+
+                if (lastAdaptiveConfig != null) {
+
+                    writer.write("\n--- NEW CONFIG ---\n");
+
+                    writer.write("New interval (ms): " + lastAdaptiveConfig.intervalMs + "\n");
+                    writer.write("New distance (m): " + lastAdaptiveConfig.distance + "\n");
+                    writer.write("New angle (deg): " + lastAdaptiveConfig.angle + "\n");
+                    writer.write("New epsilon: " + lastAdaptiveConfig.epsilon + "\n");
+                } else {
+                    writer.write("No adaptive config generated\n");
+                }
+            }
+
+            // =========================
+            // 🐞 DEBUG TRACK
+            // =========================
 
             if (debugTrackEnabled) {
 
@@ -1741,29 +1823,14 @@ public class TxForegroundService extends Service {
                 writer.write("Last SMS length: " + DebugTrackStore.smsLength + "\n");
             }
 
-            writer.write("\n--- AUTO MODE ---\n");
-
-            writer.write("Enabled: " + autoModeEnabled + "\n");
-
-            if (autoModeEnabled && lastAdaptiveConfig != null) {
-
-                writer.write("New interval (ms): " + lastAdaptiveConfig.intervalMs + "\n");
-                writer.write("New distance (m): " + lastAdaptiveConfig.distance + "\n");
-                writer.write("New angle (deg): " + lastAdaptiveConfig.angle + "\n");
-                writer.write("New epsilon: " + lastAdaptiveConfig.epsilon + "\n");
-                writer.write("New config: " + lastAdaptiveConfig + "\n");
-            }
-
             writer.write("\n=========================\n\n");
 
             // =========================
-            // LOG SMS
+            // 📩 LOG SMS
             // =========================
 
             for (String s : SmsDebugManager.getLogs()) {
-
                 writer.write(s + "\n");
-
             }
 
             writer.close();
@@ -1771,43 +1838,6 @@ public class TxForegroundService extends Service {
         } catch (IOException e) {
 
             Log.e("SMS_DEBUG", "Errore salvataggio file", e);
-
-        }
-        if (autoModeEnabled) {
-
-            AdaptiveSession session = new AdaptiveSession();
-
-            session.gpsPoints = gpsPointsCollected;
-            session.smsSent = smsSent;
-            session.distanceKm = totalDistanceMeters / 1000.0;
-            session.avgAccuracy = accuracyCount > 0 ? accuracySum / accuracyCount : 0;
-            session.durationSec = (sessionEndTime - sessionStartTime) / 1000;
-
-            session.distanceParam = trackSimplifyDistance;
-            session.angleParam = trackAngleThreshold;
-            session.epsilonParam = trackSimplifyTolerance;
-            session.intervalParam = multiSendIntervalMs;
-
-            session.compressionRatio =
-                    (double) smsSent / (double) gpsPointsCollected;
-
-            AdaptiveStore.saveSession(this, session);
-
-            if (autoModeEnabled) {
-
-                if (currentConfig != null && session != null) {
-
-                    AdaptiveConfig newConfig =
-                            AdaptiveEngine.adjust(currentConfig, session);
-
-                    if (newConfig != null) {
-                        applyAdaptiveConfig(newConfig);
-                    }
-                }
-
-            } else {
-                Log.d("ADAPTIVE", "AUTO MODE OFF → config invariata");
-            }
         }
     }
 

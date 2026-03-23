@@ -7,6 +7,10 @@ public class ParameterOptimizer {
 
     public static AdaptiveConfig optimize(List<LatLng> track) {
 
+        if (track == null || track.size() < 10) {
+            return null;
+        }
+
         AdaptiveConfig best = null;
         double bestScore = Double.MAX_VALUE;
 
@@ -19,6 +23,8 @@ public class ParameterOptimizer {
 
                     SimulationResult r =
                             OfflineSimulator.run(track, c);
+
+                    if (r.smsCount == 0) continue;
 
                     double score =
                             (r.smsCount * 1000)
