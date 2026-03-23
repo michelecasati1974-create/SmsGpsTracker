@@ -572,31 +572,25 @@ public class TxForegroundService extends Service {
 
     private void flushTrackBuffer() {
 
-        // sicurezza: flush solo in modalità MULTI_GPS
-        if (!multiGpsMode) {
-            return;
-        }
+        if (!multiGpsMode || isProcessing) return;
+
+        isProcessing = true;
+        long now = System.currentTimeMillis();
 
         List<GpsPoint> rawPoints;
 
-        // ✅ COPIA SICURA DEL BUFFER
         synchronized (bufferLock) {
-
-            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-
-            if (current == null || current.size() < 3) {
-                gpsTrackBuffer.clear();
+            rawPoints = gpsTrackBuffer.getPointsCopy();
+            if (rawPoints == null || rawPoints.size() < 5) {
+                isProcessing = false;
                 return;
             }
-
-            rawPoints = new ArrayList<>(current);
         }
 
-        // ================================
-        // FILTRO DISTANZA
-        // ================================
-
-        List<LatLng> filtered = new ArrayList<>();
+        // ========================
+        // FILTRO + SEMPLIFICAZIONE
+        // ========================
+        List<LatLng> points = new ArrayList<>();
         LatLng lastKept = null;
 
         for (GpsPoint gp : rawPoints) {
@@ -604,99 +598,120 @@ public class TxForegroundService extends Service {
             LatLng current = new LatLng(gp.getLat(), gp.getLon());
 
             if (lastKept == null) {
-                filtered.add(current);
+                points.add(current);
                 lastKept = current;
                 continue;
             }
 
             double dist = distanceMeters(
-                    lastKept.latitude,
-                    lastKept.longitude,
-                    current.latitude,
-                    current.longitude
+                    lastKept.latitude, lastKept.longitude,
+                    current.latitude, current.longitude
             );
 
-            if (dist >= trackSimplifyDistance) {
-                filtered.add(current);
-                lastKept = current;
-            }
-        }
+            if (dist < trackSimplifyDistance) continue;
 
-        if (filtered.size() < 2) {
-            synchronized (bufferLock) {
-                gpsTrackBuffer.clear();
-            }
-            return;
-        }
+            if (points.size() >= 2) {
+                LatLng prev = points.get(points.size() - 2);
+                LatLng last = points.get(points.size() - 1);
 
-        // ================================
-        // TRACK SIMPLIFICATION
-        // ================================
+                double angle = angleBetween(prev, last, current);
 
-        List<LatLng> simplified =
-                TrackSimplifier.simplify(filtered, 0.0001);
-
-        if (simplified.size() < 2) {
-            synchronized (bufferLock) {
-                gpsTrackBuffer.clear();
-            }
-            return;
-        }
-
-        // ================================
-        // POLYLINE ENCODE
-        // ================================
-
-
-        List<Pair<Double, Double>> polyPoints = new ArrayList<>();
-
-        for (LatLng pt : simplified) {
-            polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
-        }
-
-        String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
-
-        // ❗ FIX IMPORTANTE: NON troncare brutalmente
-        while (encoded.length() > trackSmsMaxLen && simplified.size() > 2) {
-
-            simplified.remove(simplified.size() - 1);
-
-            polyPoints.clear();
-
-            for (LatLng pt : simplified) {
-                polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
+                if (Math.abs(angle) < trackAngleThreshold) {
+                    points.set(points.size() - 1, current);
+                    lastKept = current;
+                    continue;
+                }
             }
 
-            encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+            points.add(current);
+            lastKept = current;
         }
 
-        int estimatedLen = encoded.length() + 5;
-
-        long now = System.currentTimeMillis();
-        boolean isNearLimit = estimatedLen >= (trackSmsMaxLen - 10);
-        boolean timeoutReached = (now - lastTrackSmsTime) >= multiSendIntervalMs;
-
-        // 🔴 BLOCCA INVIO SE NON SERVE
-        if (!isNearLimit && !timeoutReached) {
-
-            Log.d("TRACK", "WAIT → fill SMS (" + estimatedLen + " chars)");
-
+        if (points.size() < 3) {
             isProcessing = false;
             return;
         }
 
-        String payload = "T|" + encoded;
+        List<LatLng> simplified =
+                TrackSimplifier.simplify(points, trackSimplifyTolerance);
 
-        String crc = SmsCrc.INSTANCE.crc8(payload);
+        if (simplified.size() < 2) {
+            isProcessing = false;
+            return;
+        }
 
-        String sms = payload + "|" + crc;
+        // ========================
+        // SMS PACKING INTELLIGENTE
+        // ========================
+        final int MAX_SMS = 150;
+        final int SAFE_LIMIT = 145;
 
-        sendTrackSms(sms);
+        List<LatLng> block = new ArrayList<>();
+        List<LatLng> lastValidBlock = new ArrayList<>();
 
-        // ================================
-        // ROLLING BUFFER (mantieni ultimi punti)
-        // ================================
+        for (LatLng pt : simplified) {
 
+            block.add(pt);
+
+            String encoded = PolylineCodec.INSTANCE.encode(convertToPairList(block));
+            int len = encoded.length() + 10;
+
+            if (len < SAFE_LIMIT) {
+                lastValidBlock = new ArrayList<>(block);
+            }
+
+            // 🔴 SUPERATO LIMITE → INVIA BLOCCO PRECEDENTE
+            if (len >= MAX_SMS) {
+
+                if (!lastValidBlock.isEmpty()) {
+                    sendPackedSms(lastValidBlock);
+                    block = new ArrayList<>(lastValidBlock);
+                    lastValidBlock.clear();
+                } else {
+                    // fallback
+                    sendPackedSms(block);
+                    block.clear();
+                }
+            }
+        }
+
+        // 📤 INVIO FINALE (se ha senso)
+        if (!block.isEmpty()) {
+
+            String encoded = PolylineCodec.INSTANCE.encode(convertToPairList(block));
+            int len = encoded.length() + 10;
+
+            boolean timeoutReached =
+                    (now - lastTrackSmsTime) >= multiSendIntervalMs;
+
+            if (len >= SAFE_LIMIT || timeoutReached) {
+                sendPackedSms(block);
+            }
+        }
+
+        // ========================
+        // DEBUG TRACK
+        // ========================
+        if (debugTrackEnabled && DebugTrackActivity.isOpen) {
+
+            DebugTrackStore.raw = convertGpsPointsToLatLng(rawPoints);
+            DebugTrackStore.filtered = new ArrayList<>(points);
+            DebugTrackStore.simplified = new ArrayList<>(simplified);
+
+            DebugTrackStore.rawCount = rawPoints.size();
+            DebugTrackStore.filteredCount = points.size();
+            DebugTrackStore.simplifiedCount = simplified.size();
+
+            if (!block.isEmpty()) {
+                String enc = PolylineCodec.INSTANCE.encode(convertToPairList(block));
+                DebugTrackStore.smsLength = enc.length();
+                DebugTrackStore.lastSms = "T|" + enc;
+            }
+        }
+
+        // ========================
+        // ROLLING BUFFER
+        // ========================
         synchronized (bufferLock) {
 
             List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
@@ -715,7 +730,34 @@ public class TxForegroundService extends Service {
                 gpsTrackBuffer.addPoint(gp);
             }
         }
+
+        isProcessing = false;
     }
+
+    private void sendPackedSms(List<LatLng> pts) {
+
+        List<Pair<Double, Double>> poly = convertToPairList(pts);
+
+        String encoded = PolylineCodec.INSTANCE.encode(poly);
+
+        String payload = "T|" + encoded;
+        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+        sendTrackSms(sms);
+
+        lastTrackSmsTime = System.currentTimeMillis();
+    }
+
+    // Helper per convertire LatLng in Pair<Double,Double>
+    private List<Pair<Double, Double>> convertToPairList(List<LatLng> list) {
+        List<Pair<Double, Double>> result = new ArrayList<>();
+        for (LatLng l : list) {
+            result.add(new Pair<>(l.latitude, l.longitude));
+        }
+        return result;
+    }
+
+
 
 
 
