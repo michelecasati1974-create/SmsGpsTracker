@@ -36,6 +36,8 @@ import java.util.Locale;
 
 public class TxForegroundService extends Service {
 
+
+
     public static boolean smsDebugMode = false;
     public static final String ACTION_START = "ACTION_START";
     public static final String ACTION_FORCE_POSITION = "com.example.smsgpstracker.FORCE_POSITION";
@@ -116,6 +118,14 @@ public class TxForegroundService extends Service {
     private Location lastDistanceLocation = null;
     private final Object bufferLock = new Object();
     private long multiSendIntervalMs;
+
+    private List<LatLng> convertRawToLatLng(List<GpsPoint> rawPoints) {
+        List<LatLng> result = new ArrayList<>();
+        for (GpsPoint gp : rawPoints) {
+            result.add(new LatLng(gp.getLat(), gp.getLon()));
+        }
+        return result;
+    }
 
 
 
@@ -590,104 +600,24 @@ public class TxForegroundService extends Service {
         // ========================
         // FILTRO + SEMPLIFICAZIONE
         // ========================
-        List<LatLng> points = new ArrayList<>();
+        List<LatLng> points = convertRawToLatLng(rawPoints);
         LatLng lastKept = null;
-
-        for (GpsPoint gp : rawPoints) {
-
-            LatLng current = new LatLng(gp.getLat(), gp.getLon());
-
-            if (lastKept == null) {
-                points.add(current);
-                lastKept = current;
-                continue;
-            }
-
-            double dist = distanceMeters(
-                    lastKept.latitude, lastKept.longitude,
-                    current.latitude, current.longitude
-            );
-
-            if (dist < trackSimplifyDistance) continue;
-
-            if (points.size() >= 2) {
-                LatLng prev = points.get(points.size() - 2);
-                LatLng last = points.get(points.size() - 1);
-
-                double angle = angleBetween(prev, last, current);
-
-                if (Math.abs(angle) < trackAngleThreshold) {
-                    points.set(points.size() - 1, current);
-                    lastKept = current;
-                    continue;
-                }
-            }
-
-            points.add(current);
-            lastKept = current;
-        }
 
         if (points.size() < 3) {
             isProcessing = false;
             return;
         }
 
-        List<LatLng> simplified =
-                TrackSimplifier.simplify(points, trackSimplifyTolerance);
+        List<LatLng> simplified = TrackSimplifier.simplify(points, trackSimplifyTolerance);
 
         if (simplified.size() < 2) {
             isProcessing = false;
             return;
         }
 
-        // ========================
-        // SMS PACKING INTELLIGENTE
-        // ========================
-        final int MAX_SMS = 150;
-        final int SAFE_LIMIT = 145;
 
-        List<LatLng> block = new ArrayList<>();
-        List<LatLng> lastValidBlock = new ArrayList<>();
 
-        for (LatLng pt : simplified) {
 
-            block.add(pt);
-
-            String encoded = PolylineCodec.INSTANCE.encode(convertToPairList(block));
-            int len = encoded.length() + 10;
-
-            if (len < SAFE_LIMIT) {
-                lastValidBlock = new ArrayList<>(block);
-            }
-
-            // 🔴 SUPERATO LIMITE → INVIA BLOCCO PRECEDENTE
-            if (len >= MAX_SMS) {
-
-                if (!lastValidBlock.isEmpty()) {
-                    sendPackedSms(lastValidBlock);
-                    block = new ArrayList<>(lastValidBlock);
-                    lastValidBlock.clear();
-                } else {
-                    // fallback
-                    sendPackedSms(block);
-                    block.clear();
-                }
-            }
-        }
-
-        // 📤 INVIO FINALE (se ha senso)
-        if (!block.isEmpty()) {
-
-            String encoded = PolylineCodec.INSTANCE.encode(convertToPairList(block));
-            int len = encoded.length() + 10;
-
-            boolean timeoutReached =
-                    (now - lastTrackSmsTime) >= multiSendIntervalMs;
-
-            if (len >= SAFE_LIMIT || timeoutReached) {
-                sendPackedSms(block);
-            }
-        }
 
         // ========================
         // DEBUG TRACK
@@ -702,11 +632,7 @@ public class TxForegroundService extends Service {
             DebugTrackStore.filteredCount = points.size();
             DebugTrackStore.simplifiedCount = simplified.size();
 
-            if (!block.isEmpty()) {
-                String enc = PolylineCodec.INSTANCE.encode(convertToPairList(block));
-                DebugTrackStore.smsLength = enc.length();
-                DebugTrackStore.lastSms = "T|" + enc;
-            }
+
         }
 
         // ========================
@@ -734,19 +660,9 @@ public class TxForegroundService extends Service {
         isProcessing = false;
     }
 
-    private void sendPackedSms(List<LatLng> pts) {
 
-        List<Pair<Double, Double>> poly = convertToPairList(pts);
 
-        String encoded = PolylineCodec.INSTANCE.encode(poly);
 
-        String payload = "T|" + encoded;
-        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
-
-        sendTrackSms(sms);
-
-        lastTrackSmsTime = System.currentTimeMillis();
-    }
 
     // Helper per convertire LatLng in Pair<Double,Double>
     private List<Pair<Double, Double>> convertToPairList(List<LatLng> list) {
@@ -1811,7 +1727,10 @@ public class TxForegroundService extends Service {
 
             writer.write("\n--- MULTI GPS PARAMS ---\n");
 
-            writer.write("Send interval (ms): " + multiSendIntervalMs + "\n");
+            // 🔥 conversione ms → minuti
+            long intervalMinutes = multiSendIntervalMs / 60000;
+
+            writer.write("Send interval (min): " + intervalMinutes + "\n");
             writer.write("Min distance (m): " + trackSimplifyDistance + "\n");
             writer.write("Angle threshold (deg): " + trackAngleThreshold + "\n");
             writer.write("Simplify tolerance: " + trackSimplifyTolerance + "\n");
@@ -1819,33 +1738,27 @@ public class TxForegroundService extends Service {
             writer.write("Keep points: " + keepPoints + "\n");
 
             // =========================
-            // 🧠 AUTO MODE
-            // =========================
+// 🧠 AUTO MODE
+// =========================
 
             writer.write("\n--- AUTO MODE ---\n");
             writer.write("Enabled: " + autoModeEnabled + "\n");
 
             if (autoModeEnabled) {
 
-                if (session != null) {
-
-                    writer.write("\nSession ratio: " + session.compressionRatio + "\n");
-
-                    writer.write("Prev interval: " + session.intervalParam + "\n");
-                    writer.write("Prev distance: " + session.distanceParam + "\n");
-                    writer.write("Prev angle: " + session.angleParam + "\n");
-                    writer.write("Prev epsilon: " + session.epsilonParam + "\n");
-                }
-
                 if (lastAdaptiveConfig != null) {
+
+                    long intervalMin = lastAdaptiveConfig.intervalMs / 60000;
 
                     writer.write("\n--- NEW CONFIG ---\n");
 
-                    writer.write("New interval (ms): " + lastAdaptiveConfig.intervalMs + "\n");
-                    writer.write("New distance (m): " + lastAdaptiveConfig.distance + "\n");
-                    writer.write("New angle (deg): " + lastAdaptiveConfig.angle + "\n");
-                    writer.write("New epsilon: " + lastAdaptiveConfig.epsilon + "\n");
+                    writer.write("Interval: " + intervalMin + " min\n");
+                    writer.write("Distance: " + lastAdaptiveConfig.distance + " m\n");
+                    writer.write("Angle: " + lastAdaptiveConfig.angle + " deg\n");
+                    writer.write("Epsilon: " + lastAdaptiveConfig.epsilon + "\n");
+
                 } else {
+
                     writer.write("No adaptive config generated\n");
                 }
             }
@@ -1857,15 +1770,23 @@ public class TxForegroundService extends Service {
             if (debugTrackEnabled) {
 
                 writer.write("\n--- DEBUG TRACK ---\n");
-
+                writer.write("\n--- ADAPTIVE COMPRESSION ---\n");
+                writer.write("Final SMS length: " + DebugTrackStore.smsLength + "\n");
+                writer.write("Used epsilon: " + trackSimplifyTolerance + "\n");
+                writer.write("Used distance: " + trackSimplifyDistance + "\n");
+                writer.write("SMS count: " + smsSent + "\n");
                 writer.write("RAW points: " + DebugTrackStore.rawCount + "\n");
                 writer.write("FILTERED points: " + DebugTrackStore.filteredCount + "\n");
                 writer.write("SIMPLIFIED points: " + DebugTrackStore.simplifiedCount + "\n");
-
                 writer.write("Last SMS length: " + DebugTrackStore.smsLength + "\n");
             }
 
             writer.write("\n=========================\n\n");
+
+            writer.write("\n--- ADAPTIVE SMS ---\n");
+            writer.write("Final length: " + AdaptiveSmsCompressor.lastEncodedLength + "\n");
+            writer.write("Points used: " + AdaptiveSmsCompressor.lastPoints + "\n");
+            writer.write("Iterations: " + AdaptiveSmsCompressor.lastIterations + "\n");
 
             // =========================
             // 📩 LOG SMS
@@ -1882,6 +1803,8 @@ public class TxForegroundService extends Service {
             Log.e("SMS_DEBUG", "Errore salvataggio file", e);
         }
     }
+
+
 
     private void applyAdaptiveConfig(AdaptiveConfig c) {
 
@@ -1983,28 +1906,21 @@ public class TxForegroundService extends Service {
             return;
         }
         // ================================
-        // ENCODING
+        // 🧠 ADAPTIVE COMPRESSION
         // ================================
 
-        List<Pair<Double, Double>> polyPoints = new ArrayList<>();
+        CompressionResult res = AdaptiveSmsCompressor.compressToSms(
+                points,
+                trackSimplifyTolerance,
+                trackSimplifyDistance,
+                trackAngleThreshold
+        );
 
-        for (LatLng pt : simplified) {
-            polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
-        }
+        String encoded = res.encoded;
 
-        String encoded = PolylineCodec.INSTANCE.encode(polyPoints);
-
-        while (encoded.length() > trackSmsMaxLen && simplified.size() > 2) {
-
-            simplified.remove(simplified.size() - 1);
-
-            polyPoints.clear();
-
-            for (LatLng pt : simplified) {
-                polyPoints.add(new Pair<>(pt.latitude, pt.longitude));
-            }
-
-            encoded = PolylineCodec.INSTANCE.encode(polyPoints);
+        if (debugTrackEnabled) {
+            DebugTrackStore.smsLength = AdaptiveSmsCompressor.lastEncodedLength;
+            DebugTrackStore.simplifiedCount = AdaptiveSmsCompressor.lastPoints;
         }
 
         // 🔴 LIMIT SMS
@@ -2017,9 +1933,8 @@ public class TxForegroundService extends Service {
             return;
         }
 
-        String payload = "T|" + encoded;
-        String crc = SmsCrc.INSTANCE.crc8(payload);
-        String sms = payload + "|" + crc;
+        String payload = "T|" + res.encoded;
+        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
 
         sendTrackSms(sms);
         lastTrackSmsTime = now;

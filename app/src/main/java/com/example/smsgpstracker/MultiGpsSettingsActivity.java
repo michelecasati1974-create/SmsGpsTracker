@@ -39,8 +39,12 @@ public class MultiGpsSettingsActivity extends AppCompatActivity {
         EditText edtKeep = findViewById(R.id.edtKeep);
 
         // DEFAULT TREKKING
-        edtInterval.setText(String.valueOf(
-                prefs.getLong("multi_send_interval", 240000)));
+        long intervalMs = prefs.getLong("multi_send_interval", 240000);
+
+        // 🔥 conversione ms → minuti
+        long intervalMin = intervalMs / 60000;
+
+        edtInterval.setText(String.valueOf(intervalMin));
 
         edtDistance.setText(String.valueOf(
                 prefs.getFloat("multi_min_distance", 8)));
@@ -63,7 +67,7 @@ public class MultiGpsSettingsActivity extends AppCompatActivity {
 
             prefs.edit()
                     .putLong("multi_send_interval",
-                            Long.parseLong(edtInterval.getText().toString()))
+                            Long.parseLong(edtInterval.getText().toString()) * 60 * 1000)
 
                     .putFloat("multi_min_distance",
                             Float.parseFloat(edtDistance.getText().toString()))

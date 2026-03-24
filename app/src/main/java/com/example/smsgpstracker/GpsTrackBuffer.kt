@@ -21,7 +21,7 @@ class GpsTrackBuffer(context: Context) {
         context.getSharedPreferences("TRACK_BUFFER", Context.MODE_PRIVATE)
 
     private val KEY_BUFFER = "gps_buffer"
-    private val MAX_POINTS = 400
+    private val MAX_POINTS = 5000
 
     // ================================
     // ADD POINT (THREAD SAFE)
