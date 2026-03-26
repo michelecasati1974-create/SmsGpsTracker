@@ -19,6 +19,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.example.smsgpstracker.TxForegroundService.NetworkState
 
 
 class TxActivity : AppCompatActivity() {
@@ -57,6 +58,10 @@ class TxActivity : AppCompatActivity() {
     private lateinit var switchNoSignalAlert: Switch
 
     private lateinit var btnMultiGpsSettings: Button
+
+    private lateinit var txtNetworkType: TextView
+    private lateinit var txtNetworkState: TextView
+    private lateinit var txtSignalDbm: TextView
     enum class TxStatus { IDLE, WAITING, TRACKING }
     enum class RxRemoteStatus { UNKNOWN, ALIVE, LOST }
 
@@ -120,7 +125,7 @@ class TxActivity : AppCompatActivity() {
 
             if (intent.hasExtra("signalDbm") && currentStatus != TxStatus.IDLE) {
                 val dbm = intent.getIntExtra("signalDbm", -150)
-                updateSignalUi(dbm)
+                updateSignalUi(dbm, NetworkState.ONLINE)
             }
         }
     }
@@ -194,6 +199,14 @@ class TxActivity : AppCompatActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onResume() {
         super.onResume()
+        // 🔥 NETWORK RECEIVER
+        val netFilter = IntentFilter("NETWORK_UPDATE")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(networkReceiver, netFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(networkReceiver, netFilter)
+        }
 
         val debugFilter = IntentFilter("TX_DEBUG_UPDATE")
 
@@ -202,6 +215,8 @@ class TxActivity : AppCompatActivity() {
         } else {
             registerReceiver(debugReceiver, debugFilter)
         }
+
+
 
         restoreServiceState()
 
@@ -219,6 +234,11 @@ class TxActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+
+        try {
+            unregisterReceiver(networkReceiver)
+        } catch (_: Exception) {}
+
         try {
             unregisterReceiver(updateReceiver)
         } catch (_: Exception) {}
@@ -234,6 +254,8 @@ class TxActivity : AppCompatActivity() {
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
+
+
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tx)
 
@@ -254,7 +276,9 @@ class TxActivity : AppCompatActivity() {
 
         }
 
-
+        txtNetworkType = findViewById(R.id.txtNetworkType);
+        txtNetworkState = findViewById(R.id.txtNetworkState);
+        txtSignalDbm = findViewById(R.id.txtSignalDbm);
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         btnStartTx = findViewById(R.id.btnStartTx)
         btnStopTx = findViewById(R.id.btnStopTx)
@@ -431,6 +455,62 @@ class TxActivity : AppCompatActivity() {
 
     }
 
+    fun updateNetworkUI(dbm: Int, networkType: String?, state: NetworkState) {
+        runOnUiThread(Runnable {
+            txtSignalDbm!!.setText(dbm.toString() + " dBm")
+            txtNetworkType.text = networkType ?: "--"
+            txtSignalDbm.text = "$dbm dBm"
+
+            when (state) {
+                NetworkState.ONLINE -> {
+                    txtNetworkState!!.setText("Segnale rete attivo")
+                    txtNetworkState.setTextColor(-0xb350b0) // verde chiaro
+                }
+
+                NetworkState.WEAK_SIGNAL -> {
+                    txtNetworkState!!.setText("Segnale rete debole")
+                    txtNetworkState.setTextColor(-0x6800) // arancio
+                }
+
+                NetworkState.NO_SIGNAL -> {
+                    txtNetworkState!!.setText("Segnale assente")
+                    txtNetworkState.setTextColor(-0xbbcca) // rosso
+                }
+
+                NetworkState.RECOVERY -> {
+                    txtNetworkState!!.setText("Recupero segnale")
+                    txtNetworkState.setTextColor(-0xde690d) // blu
+                }
+            }
+
+            // 🔥 livello extra (dbm → qualità)
+            if (dbm > -70) {
+                txtNetworkState.setText("Segnale ottimo")
+                txtNetworkState.setTextColor(-0xe4a1e0) // verde scuro
+            }
+        })
+    }
+
+    private val networkReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent) {
+
+            Log.d("UI_NETWORK", "Ricevuto broadcast")
+
+            val dbm = intent.getIntExtra("dbm", -120)
+            val type = intent.getStringExtra("type")
+            val stateStr = intent.getStringExtra("state")
+
+            val state = NetworkState.valueOf(stateStr!!)
+
+            // ✅ aggiorna UI nuova
+            updateNetworkUI(dbm, type, state)
+
+            // 🔥 AGGIUNGI QUESTO
+            updateSignalUi(dbm, state)
+        }
+    }
+
+
     private fun startMultiGpsTracking() {
 
         val phone = prefs.getString(KEY_PHONE, null)
@@ -582,25 +662,18 @@ class TxActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSignalUi(dbm: Int) {
-
-        val signalThreshold = prefs.getInt("signal_threshold", -90)
+    private fun updateSignalUi(dbm: Int, state: NetworkState) {
 
         txtSignalInfo.text = "$dbm dBm"
 
-        val level = when {
-            dbm >= -75 -> 5
-            dbm >= -85 -> 4
-            dbm >= -95 -> 3
-            dbm >= -105 -> 2
-            else -> 1
+        val level = when (state) {
+            NetworkState.ONLINE -> if (dbm > -75) 5 else 4
+            NetworkState.WEAK_SIGNAL -> if (dbm > -95) 3 else 2
+            NetworkState.NO_SIGNAL -> 0
+            NetworkState.RECOVERY -> 2
         }
 
         updateBar(signalBars, level)
-
-        if (dbm < signalThreshold) {
-            imgLedTx.background.setTint(Color.RED)
-        }
     }
 
     private fun updateBar(bars: List<View>, level: Int) {

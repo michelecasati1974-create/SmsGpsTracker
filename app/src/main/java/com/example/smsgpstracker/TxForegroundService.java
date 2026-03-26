@@ -30,11 +30,57 @@ import android.os.Environment;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.LinkedList;
+import java.util.Deque;
+import java.util.ArrayDeque;
+import android.telephony.ServiceState;
+import java.util.Queue;
+
 
 
 
 
 public class TxForegroundService extends Service {
+
+    public enum SignalLevel {
+        EXCELLENT,
+        GOOD,
+        WEAK,
+        CRITICAL,
+        NO_SIGNAL
+    }
+    public enum NetworkState {
+        ONLINE,
+        WEAK_SIGNAL,
+        NO_SIGNAL,
+        RECOVERY
+    }
+    private SignalLevel currentSignalLevel = SignalLevel.NO_SIGNAL;
+    private NetworkState currentNetworkState = NetworkState.NO_SIGNAL;
+    private boolean networkAvailable = false;
+    private boolean finalSmsSent = false;
+
+
+    private boolean noSignalAlertEnabled = false;
+
+    private long noSignalStartTime = 0;
+    private long lastVibrationTime = 0;
+
+    private int noSignalTc = 10; // sec
+    private int vibrationTs = 3; // sec
+
+
+
+
+
+    // buffer per media mobile
+    private final LinkedList<Integer> signalHistory = new LinkedList<>();
+    private static final int SIGNAL_WINDOW = 10;
+
+    private final Deque<Integer> signalWindow = new ArrayDeque<>();
+    private static final int WINDOW_SIZE = 10;
+
+    private final Queue<String> smsQueue = new LinkedList<>();
 
 
 
@@ -60,14 +106,15 @@ public class TxForegroundService extends Service {
     private String phoneNumber = "";
     private long cycleStartTime = 0;
     private long nextTickTime = 0;
-    private boolean noSignalAlertEnabled = false;
-    private long noSignalStartTime = 0;
+
+
     private boolean vibrationTriggered = false;
     private static final int NOTIFICATION_ID = 1;
     private Handler handler = new Handler(Looper.getMainLooper(), null);
     private Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private boolean debugTrackEnabled;
+    private boolean isFinalFlush = false;
 
 
     private HighFrequencyTracker highFrequencyTracker = new HighFrequencyTracker();
@@ -119,12 +166,209 @@ public class TxForegroundService extends Service {
     private final Object bufferLock = new Object();
     private long multiSendIntervalMs;
 
+    // =======================
+    // SMS PROTOCOLLO
+    // =======================
+    private String currentSessionId = "0000";
+    private int currentSeq = 0;
+    private int totalSms = 0;
+    private String generateSessionId() {
+        return Integer.toHexString((int)(System.currentTimeMillis() & 0xFFFF)).toUpperCase();
+    }
+
+    private SignalLevel classifySignal(int dbm) {
+
+        if (dbm == 0 || dbm < -140) {
+            return SignalLevel.NO_SIGNAL;
+        }
+
+        if (dbm > -70) return SignalLevel.EXCELLENT;
+        if (dbm > -85) return SignalLevel.GOOD;
+        if (dbm > -100) return SignalLevel.WEAK;
+
+        return SignalLevel.CRITICAL;
+    }
+
+    private int computeAverageSignal(int newDbm) {
+
+        signalHistory.add(newDbm);
+
+        if (signalHistory.size() > SIGNAL_WINDOW) {
+            signalHistory.removeFirst();
+        }
+
+        int sum = 0;
+
+        for (int v : signalHistory) {
+            sum += v;
+        }
+
+        return sum / signalHistory.size();
+    }
+
+    private int getSmoothedDbm(int newDbm) {
+
+        signalWindow.addLast(newDbm);
+
+        if (signalWindow.size() > WINDOW_SIZE) {
+            signalWindow.removeFirst();
+        }
+
+        int sum = 0;
+        for (int v : signalWindow) sum += v;
+
+        return sum / signalWindow.size();
+    }
+
+
+
+    private String getTrend() {
+
+        if (signalWindow.size() < 3) return "STABLE";
+
+        int first = signalWindow.peekFirst();
+        int last = signalWindow.peekLast();
+
+        if (last - first > 5) return "IMPROVING";
+        if (first - last > 5) return "DEGRADING";
+
+        return "STABLE";
+    }
+
+    private void updateNetworkState(int dbm) {
+        handleNoSignalAlert(currentNetworkState);
+
+        NetworkState previous = currentNetworkState;
+
+        if (!networkAvailable) {
+            currentNetworkState = NetworkState.NO_SIGNAL;
+
+        } else if (dbm < -100) {
+            currentNetworkState = NetworkState.WEAK_SIGNAL;
+
+        } else {
+            currentNetworkState = NetworkState.ONLINE;
+        }
+
+        // ?? rileva recovery
+        if (previous == NetworkState.NO_SIGNAL &&
+                currentNetworkState != NetworkState.NO_SIGNAL) {
+
+            currentNetworkState = NetworkState.RECOVERY;
+        }
+    }
+
+    private void handleNoSignalAlert(NetworkState state) {
+
+        if (!noSignalAlertEnabled) return;
+
+        long now = System.currentTimeMillis();
+
+        if (state == NetworkState.NO_SIGNAL) {
+
+            if (noSignalStartTime == 0) {
+                noSignalStartTime = now;
+            }
+
+            long elapsed = (now - noSignalStartTime) / 1000;
+
+            if (elapsed >= noSignalTc &&
+                    (now - lastVibrationTime > vibrationTs * 2000)) {
+
+                triggerVibration();
+                lastVibrationTime = now;
+            }
+
+        } else {
+            noSignalStartTime = 0;
+        }
+    }
+
+    private void queueSms(String sms) {
+        smsQueue.add(sms);
+        Log.d("SMS", "Queued (no signal)");
+    }
+
+    private void flushQueue() {
+
+        Log.d("SMS", "Flushing queue: " + smsQueue.size());
+
+        while (!smsQueue.isEmpty()) {
+
+            String msg = smsQueue.poll();
+
+            sendNow(msg);
+
+            try { Thread.sleep(300); } catch (Exception ignored) {}
+        }
+    }
+
+    private void sendNow(String text) {
+
+        SmsManager.getDefault().sendTextMessage(
+                phoneNumber, null, text, null, null);
+    }
+
+    private String getNetworkType() {
+
+        try {
+
+            if (ActivityCompat.checkSelfPermission(this,
+                    Manifest.permission.READ_PHONE_STATE)
+                    != PackageManager.PERMISSION_GRANTED) {
+
+                return "NO PERM";
+            }
+
+            int type = telephonyManager.getDataNetworkType();
+
+            switch (type) {
+                case TelephonyManager.NETWORK_TYPE_LTE: return "LTE";
+                case TelephonyManager.NETWORK_TYPE_NR: return "5G";
+                case TelephonyManager.NETWORK_TYPE_HSPA: return "HSPA";
+                case TelephonyManager.NETWORK_TYPE_EDGE: return "EDGE";
+                default: return "UNKNOWN";
+            }
+
+        } catch (Exception e) {
+            return "ERR";
+        }
+    }
+
     private List<LatLng> convertRawToLatLng(List<GpsPoint> rawPoints) {
         List<LatLng> result = new ArrayList<>();
         for (GpsPoint gp : rawPoints) {
             result.add(new LatLng(gp.getLat(), gp.getLon()));
         }
         return result;
+    }
+
+    private List<String> splitEncoded(String encoded, int maxLen) {
+
+        List<String> parts = new ArrayList<>();
+
+        int start = 0;
+
+        while (start < encoded.length()) {
+
+            int end = Math.min(start + maxLen, encoded.length());
+
+            parts.add(encoded.substring(start, end));
+
+            start = end;
+        }
+
+        return parts;
+    }
+
+    private int computeChunkSize(int totalParts) {
+
+        // es: "T10/10|" = ~7 char
+        int headerSize = 7;
+
+        int crcSize = 3; // |XX
+
+        return 150 - headerSize - crcSize;
     }
 
 
@@ -282,7 +526,7 @@ public class TxForegroundService extends Service {
             lastMovementTime = now;
 
             if (stopMode) {
-                Log.d("SMART_STOP", "movement detected → exit STOP mode");
+                Log.d("SMART_STOP", "movement detected ? exit STOP mode");
             }
 
             stopMode = false;
@@ -541,7 +785,7 @@ public class TxForegroundService extends Service {
                     gpsTrackBuffer.addPoint(p);
                 }
 
-                // 👇 SOLO LOG DI DEBUG (opzionale)
+                // ?? SOLO LOG DI DEBUG (opzionale)
                 int size;
 
                 synchronized (bufferLock) {
@@ -680,6 +924,14 @@ public class TxForegroundService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 
+        noSignalAlertEnabled = intent.getBooleanExtra("noSignalAlert", false);
+
+        // 🔥 leggi anche da SharedPreferences
+        SharedPreferences prefs = getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
+
+        noSignalTc = prefs.getInt("noSignalTc", 10);
+        vibrationTs = prefs.getInt("vibrationTs", 3);
+
         Log.d("TX_SERVICE", "Service started");
 
         startForeground(NOTIFICATION_ID, createNotification());
@@ -689,6 +941,9 @@ public class TxForegroundService extends Service {
         String action = intent.getAction();
 
         if (ACTION_START.equals(action)) {
+
+            currentSessionId = generateSessionId();
+            currentSeq = 0;
 
             String mode = intent.getStringExtra("MODE");
             if (mode == null) mode = "STANDARD";
@@ -781,26 +1036,47 @@ public class TxForegroundService extends Service {
 
             Log.d("TX_SERVICE", "STOP ACTION RECEIVED");
 
-            //logSessionSummary();   // <-- aggiungere
-
-            if (multiGpsMode && gpsTrackBuffer.count() >= 5) {
-                processTrackBuffer();
-            }
-
-            if (phoneNumber != null && !phoneNumber.isEmpty()) {
-                sendControlSms("CTRL:STOP");
-            }
-
             sessionEndTime = System.currentTimeMillis();
 
+            // ================================
+            // ?? MULTIGPS ? FINAL FLUSH
+            // ================================
+            if (multiGpsMode && !finalSmsSent) {
 
+                if (gpsTrackBuffer.count() > 0) {
 
+                    isFinalFlush = true;
+                    processTrackBuffer();
+
+                    finalSmsSent = true;
+                }
+             else {
+                    Log.d("TRACK", "No points to flush");
+                }
+            } else {
+
+                // ================================
+                // ?? ALTRE MODALITÀ ? CTRL STOP
+                // ================================
+                if (phoneNumber != null && !phoneNumber.isEmpty()) {
+                    sendControlSms("CTRL:STOP");
+                }
+            }
+
+            // ================================
+            // ?? SALVATAGGIO LOG
+            // ================================
             saveSmsLog();
+
+            // ================================
+            // ?? AUTO MODE
+            // ================================
             if (autoModeEnabled) {
 
-                // 🔒 sicurezza base (evita divisioni per zero)
                 if (gpsPointsCollected == 0 || smsSent == 0) {
+
                     Log.d("ADAPTIVE", "Skip (no data)");
+
                 } else {
 
                     AdaptiveSession session = new AdaptiveSession();
@@ -819,8 +1095,6 @@ public class TxForegroundService extends Service {
                     session.compressionRatio =
                             (double) smsSent / (double) gpsPointsCollected;
 
-                    AdaptiveConfig current = currentConfig;
-
                     AdaptiveConfig newConfig = null;
 
                     try {
@@ -829,12 +1103,9 @@ public class TxForegroundService extends Service {
                         Log.e("ADAPTIVE", "Adjust error", e);
                     }
 
-                    // 🔥 APPLICA SOLO SE VALIDA
                     if (newConfig != null) {
 
                         applyAdaptiveConfig(newConfig);
-
-                        // 🔥 salva anche per SESSION REPORT
                         lastAdaptiveConfig = newConfig;
 
                         saveAdaptiveReport(session, newConfig);
@@ -844,9 +1115,13 @@ public class TxForegroundService extends Service {
                     }
                 }
             }
-            saveTxState("IDLE");
 
+            // ================================
+            // ?? STOP REALE SERVIZIO
+            // ================================
             stopTrackingInternal();
+
+            saveTxState("IDLE");
 
             stopForeground(true);
 
@@ -896,7 +1171,7 @@ public class TxForegroundService extends Service {
                 getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
 
         // ================================
-// 🔥 PARAMETRI MULTI GPS
+// ?? PARAMETRI MULTI GPS
 // ================================
 
         float simplifyTolerance =
@@ -924,7 +1199,7 @@ public class TxForegroundService extends Service {
 
 
         // ================================
-        // 🔥 INIT ADAPTIVE CONFIG
+        // ?? INIT ADAPTIVE CONFIG
         // ================================
 
         currentConfig = new AdaptiveConfig(
@@ -958,7 +1233,7 @@ public class TxForegroundService extends Service {
 
         int keepPointsPref = prefs.getInt("multi_keep_points", 3);
         this.keepPoints = keepPointsPref;
-        // ✅ QUI VA IL LOG (POSIZIONE GIUSTA)
+        // ? QUI VA IL LOG (POSIZIONE GIUSTA)
         Log.d("MULTI_GPS_CONFIG",
                 "interval=" + multiGpsSendIntervalMs +
                         " dist=" + trackSimplifyDistance +
@@ -1072,28 +1347,25 @@ public class TxForegroundService extends Service {
 
     private void triggerVibration() {
 
-        int Ts = getSharedPreferences("SmsGpsTrackerPrefs",
-                MODE_PRIVATE)
-                .getInt("vibrationTs", 3);
+        try {
+            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
 
-        long duration = Ts * 1000L;
+            if (vibrator != null && vibrator.hasVibrator()) {
 
-        Vibrator vibrator =
-                (Vibrator) getSystemService(VIBRATOR_SERVICE);
-
-        if (vibrator != null) {
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-
-                vibrator.vibrate(
-                        VibrationEffect.createOneShot(
-                                duration,
-                                VibrationEffect.DEFAULT_AMPLITUDE)
-                );
-
-            } else {
-                vibrator.vibrate(duration);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                            VibrationEffect.createOneShot(
+                                    vibrationTs * 1000L,
+                                    VibrationEffect.DEFAULT_AMPLITUDE
+                            )
+                    );
+                } else {
+                    vibrator.vibrate(vibrationTs * 1000L);
+                }
             }
+
+        } catch (Exception e) {
+            Log.e("VIBRATION", "Errore vibrazione", e);
         }
     }
 
@@ -1209,7 +1481,7 @@ public class TxForegroundService extends Service {
         try {
 
             String message =
-                    "🌟 POS MANUALE:\n"
+                    "?? POS MANUALE:\n"
                             + lastLocation.getLatitude()
                             + ","
                             + lastLocation.getLongitude();
@@ -1402,7 +1674,7 @@ public class TxForegroundService extends Service {
 
     private void sendGpsRealtimeUpdate(double lat, double lon, float accuracy) {
 
-        // 🔥 SALVA COORDINATE GLOBALI
+        // ?? SALVA COORDINATE GLOBALI
         lastLatitude = lat;
         lastLongitude = lon;
 
@@ -1419,44 +1691,34 @@ public class TxForegroundService extends Service {
 
     private void sendTrackSms(String text) {
 
-        // log sempre
         SmsDebugManager.logTx(text);
+
         smsSent++;
         updateUiSmsCounter();
 
-        // blocco totale SMS se debug attivo
-        if (smsDebugMode) {
-            Log.d("SMS_DEBUG", "SMS BLOCCATO (debug mode)");
-            return;
-        }
+        if (smsDebugMode) return;
 
-        if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
-            Log.e("SMS_TRACK", "Numero RX non valido");
-            return;
-        }
+        // ================================
+        // ?? LOGICA INTELLIGENTE
+        // ================================
+        switch (currentNetworkState) {
 
-        SmsManager smsManager;
+            case ONLINE:
+                sendNow(text);
+                break;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            smsManager = getSystemService(SmsManager.class);
-        } else {
-            smsManager = SmsManager.getDefault();
-        }
+            case WEAK_SIGNAL:
+                handler.postDelayed(() -> sendNow(text), 5000);
+                break;
 
-        try {
+            case NO_SIGNAL:
+                queueSms(text);
+                break;
 
-            Log.d("SMS_TRACK", "Invio SMS a: " + phoneNumber);
-            Log.d("SMS_TRACK", "Payload: " + text);
-
-            smsManager.sendTextMessage(phoneNumber, null, text, null, null);
-
-
-
-            Log.d("SMS_TRACK", "SMS inviato");
-
-        } catch (Exception e) {
-
-            Log.e("SMS_TRACK", "Errore invio SMS: " + e.getMessage());
+            case RECOVERY:
+                flushQueue();
+                sendNow(text);
+                break;
         }
     }
 
@@ -1585,7 +1847,7 @@ public class TxForegroundService extends Service {
         try {
 
             // =========================
-            // 🔥 AUTO MODE → CALCOLO PRIMA
+            // ?? AUTO MODE ? CALCOLO PRIMA
             // =========================
 
             AdaptiveSession session = null;
@@ -1617,10 +1879,10 @@ public class TxForegroundService extends Service {
 
                     if (newConfig != null) {
 
-                        // 🔥 SALVA PER REPORT
+                        // ?? SALVA PER REPORT
                         lastAdaptiveConfig = newConfig;
 
-                        // 🔥 APPLICA NUOVA CONFIG
+                        // ?? APPLICA NUOVA CONFIG
                         applyAdaptiveConfig(newConfig);
 
                         Log.d("ADAPTIVE", "NEW CONFIG: " + newConfig);
@@ -1629,7 +1891,7 @@ public class TxForegroundService extends Service {
             }
 
             // =========================
-            // 📁 CREAZIONE FILE
+            // ?? CREAZIONE FILE
             // =========================
 
             File folder = new File(
@@ -1652,7 +1914,7 @@ public class TxForegroundService extends Service {
             FileWriter writer = new FileWriter(file);
 
             // =========================
-            // 📊 STATISTICHE
+            // ?? STATISTICHE
             // =========================
 
             long durationMs = sessionEndTime - sessionStartTime;
@@ -1684,13 +1946,11 @@ public class TxForegroundService extends Service {
                 mode = "STANDARD";
 
             // =========================
-            // 🧾 SESSION STATS
+            // ?? SESSION STATS
             // =========================
 
             writer.write("===== SESSION STATS =====\n\n");
-
             writer.write("Session mode: " + mode + "\n");
-
             writer.write(String.format(
                     "Session duration: %02d:%02d\n",
                     minutes,
@@ -1698,36 +1958,30 @@ public class TxForegroundService extends Service {
             ));
 
             writer.write("\n");
-
             writer.write("SMS sent: " + smsSent + "\n");
             writer.write("Log entries: " + logEntries + "\n");
-
             writer.write("\n");
-
             writer.write("GPS points: " + gpsPointsCollected + "\n");
-
             writer.write(String.format(
                     "Distance travelled: %.2f km\n",
                     distanceKm
             ));
-
             writer.write(String.format(
                     "Avg GPS accuracy: %.1f m\n",
                     avgAccuracy
             ));
-
             writer.write(String.format(
                     "Compression ratio: %.4f\n",
                     compression
             ));
 
             // =========================
-            // ⚙️ PARAMETRI MULTI GPS
+            // ?? PARAMETRI MULTI GPS
             // =========================
 
             writer.write("\n--- MULTI GPS PARAMS ---\n");
 
-            // 🔥 conversione ms → minuti
+            // ?? conversione ms ? minuti
             long intervalMinutes = multiSendIntervalMs / 60000;
 
             writer.write("Send interval (min): " + intervalMinutes + "\n");
@@ -1738,8 +1992,8 @@ public class TxForegroundService extends Service {
             writer.write("Keep points: " + keepPoints + "\n");
 
             // =========================
-// 🧠 AUTO MODE
-// =========================
+            // ?? AUTO MODE
+            // =========================
 
             writer.write("\n--- AUTO MODE ---\n");
             writer.write("Enabled: " + autoModeEnabled + "\n");
@@ -1751,7 +2005,6 @@ public class TxForegroundService extends Service {
                     long intervalMin = lastAdaptiveConfig.intervalMs / 60000;
 
                     writer.write("\n--- NEW CONFIG ---\n");
-
                     writer.write("Interval: " + intervalMin + " min\n");
                     writer.write("Distance: " + lastAdaptiveConfig.distance + " m\n");
                     writer.write("Angle: " + lastAdaptiveConfig.angle + " deg\n");
@@ -1764,13 +2017,12 @@ public class TxForegroundService extends Service {
             }
 
             // =========================
-            // 🐞 DEBUG TRACK
+            // ?? DEBUG TRACK
             // =========================
 
             if (debugTrackEnabled) {
 
                 writer.write("\n--- DEBUG TRACK ---\n");
-                writer.write("\n--- ADAPTIVE COMPRESSION ---\n");
                 writer.write("Final SMS length: " + DebugTrackStore.smsLength + "\n");
                 writer.write("Used epsilon: " + trackSimplifyTolerance + "\n");
                 writer.write("Used distance: " + trackSimplifyDistance + "\n");
@@ -1780,16 +2032,15 @@ public class TxForegroundService extends Service {
                 writer.write("SIMPLIFIED points: " + DebugTrackStore.simplifiedCount + "\n");
                 writer.write("Last SMS length: " + DebugTrackStore.smsLength + "\n");
             }
-
-            writer.write("\n=========================\n\n");
-
             writer.write("\n--- ADAPTIVE SMS ---\n");
             writer.write("Final length: " + AdaptiveSmsCompressor.lastEncodedLength + "\n");
             writer.write("Points used: " + AdaptiveSmsCompressor.lastPoints + "\n");
             writer.write("Iterations: " + AdaptiveSmsCompressor.lastIterations + "\n");
 
+            writer.write("\n=========================\n\n");
+
             // =========================
-            // 📩 LOG SMS
+            // ?? LOG SMS
             // =========================
 
             for (String s : SmsDebugManager.getLogs()) {
@@ -1823,15 +2074,13 @@ public class TxForegroundService extends Service {
         List<GpsPoint> rawPoints;
 
         synchronized (bufferLock) {
-
             List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
 
-            if (current == null || current.size() < 5) {
+            if (current == null || current.size() < 10) {
                 return;
             }
 
             rawPoints = new ArrayList<>(current);
-
         }
 
         if (!isRunning || !multiGpsMode || isProcessing) return;
@@ -1839,141 +2088,134 @@ public class TxForegroundService extends Service {
         isProcessing = true;
         long now = System.currentTimeMillis();
 
-        // 📦 sicurezza minima dati
-        boolean enoughPoints =
-                rawPoints.size() >= 10;
-
-        if (rawPoints.size() < 10) {
-            Log.d("TRACK", "Skip send (not enough points)");
-            isProcessing = false;
-            return;
-        }
-
+        // ?? CONVERSIONE UNA VOLTA SOLA
+        List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
 
         // ================================
-        // FILTRO + SEMPLIFICAZIONE
+        // ?? STEP 3.5 — TARGET DINAMICO
         // ================================
+        int pointsSize = latLngPoints.size(); // ? meglio di rawPoints
+        int dynamicTarget;
 
-        List<LatLng> points = new ArrayList<>();
-        LatLng lastKept = null;
-
-        for (GpsPoint gp : rawPoints) {
-
-            LatLng current = new LatLng(gp.getLat(), gp.getLon());
-
-            if (lastKept == null) {
-                points.add(current);
-                lastKept = current;
-                continue;
-            }
-
-            double dist = distanceMeters(
-                    lastKept.latitude,
-                    lastKept.longitude,
-                    current.latitude,
-                    current.longitude
-            );
-
-            if (dist < trackSimplifyDistance) continue;
-
-            if (points.size() >= 2) {
-
-                LatLng prev = points.get(points.size() - 2);
-                LatLng last = points.get(points.size() - 1);
-
-                double angle = angleBetween(prev, last, current);
-
-                if (Math.abs(angle) < trackAngleThreshold) {
-                    points.set(points.size() - 1, current);
-                    lastKept = current;
-                    continue;
-                }
-            }
-
-            points.add(current);
-            lastKept = current;
+        if (pointsSize > 400) {
+            dynamicTarget = 150;
+        } else if (pointsSize > 200) {
+            dynamicTarget = 140;
+        } else if (pointsSize > 100) {
+            dynamicTarget = 120;
+        } else if (pointsSize > 50) {
+            dynamicTarget = 100;
+        } else {
+            dynamicTarget = 80;
         }
 
-        if (points.size() < 3) {
-            isProcessing = false;
-            return;
-        }
-        List<LatLng> simplified =
-                TrackSimplifier.simplify(points, trackSimplifyTolerance);
+        Log.d("ADAPT", "Dynamic target=" + dynamicTarget + " | pts=" + pointsSize);
 
-        if (simplified.size() < 2) {
-            isProcessing = false;
-            return;
-        }
         // ================================
-        // 🧠 ADAPTIVE COMPRESSION
+        // ?? ADAPTIVE COMPRESSION
         // ================================
-
         CompressionResult res = AdaptiveSmsCompressor.compressToSms(
-                points,
+                latLngPoints,
                 trackSimplifyTolerance,
                 trackSimplifyDistance,
-                trackAngleThreshold
+                trackAngleThreshold,
+                dynamicTarget
         );
 
-        String encoded = res.encoded;
-
-        if (debugTrackEnabled) {
-            DebugTrackStore.smsLength = AdaptiveSmsCompressor.lastEncodedLength;
-            DebugTrackStore.simplifiedCount = AdaptiveSmsCompressor.lastPoints;
-        }
-
-        // 🔴 LIMIT SMS
+        // ?? LIMIT SMS
         if (smsSent >= maxSmsPerSession) {
-
-            Log.d("TRACK", "Max SMS reached → STOP");
-
             stopTrackingInternal();
             isProcessing = false;
             return;
         }
 
-        String payload = "T|" + res.encoded;
-        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+        // ================================
+        // ?? MULTI-SMS + FLAG FINALE
+        // ================================
+        String encoded = res.encoded;
+        int chunkSize = 130; // chunk iniziale safe, ridimensionato dinamicamente
+        List<String> parts = splitEncoded(encoded, chunkSize);
+        int totalParts = parts.size();
+        // 🔥 PROTOCOLLO SMS
 
-        sendTrackSms(sms);
+        // ricalcolo chunk size preciso
+        chunkSize = computeChunkSize(totalParts);
+        parts = splitEncoded(encoded, chunkSize);
+        totalParts = parts.size();
+
+        for (int i = 0; i < totalParts; i++) {
+
+            currentSeq++;
+
+            String type = (isFinalFlush && i == totalParts - 1) ? "F" : "D";
+
+            String header = "TX|" +
+                    currentSessionId + "|" +
+                    currentSeq + "|"+   // 🔥 niente più /tot
+                    type + "|";
+
+            String payload = header + parts.get(i);
+
+            String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+            Log.d("SMS_PROTO", sms);
+
+            sendTrackSms(sms);
+
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {}
+        }
+
+        isFinalFlush = false; // reset flag
         lastTrackSmsTime = now;
 
         // ================================
         // ROLLING BUFFER
         // ================================
-
         synchronized (bufferLock) {
 
             List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-
             int keep = Math.min(keepPoints, current.size());
 
             List<GpsPoint> tail = new ArrayList<>();
-
             for (int i = current.size() - keep; i < current.size(); i++) {
                 tail.add(current.get(i));
             }
 
             gpsTrackBuffer.clear();
-
             for (GpsPoint gp : tail) {
                 gpsTrackBuffer.addPoint(gp);
             }
         }
-        isProcessing = false;
+
+        // ================================
+        // DEBUG COERENTE
+        // ================================
+
+        List<LatLng> filtered =
+                BasicFilter.apply(latLngPoints,
+                        (float) trackSimplifyDistance,
+                        (float) trackAngleThreshold);
+
+        List<LatLng> simplified =
+                TrackSimplifier.simplify(filtered, trackSimplifyTolerance);
+
         if (debugTrackEnabled && DebugTrackActivity.isOpen) {
 
-            DebugTrackStore.raw = convertGpsPointsToLatLng(rawPoints);
-            DebugTrackStore.filtered = new ArrayList<>(points);
-            DebugTrackStore.simplified = new ArrayList<>(simplified);
+            DebugTrackStore.raw = latLngPoints;
+            DebugTrackStore.filtered = filtered;
+            DebugTrackStore.simplified = simplified;
 
-            DebugTrackStore.rawCount = rawPoints.size();
-            DebugTrackStore.filteredCount = points.size();
+            DebugTrackStore.rawCount = latLngPoints.size();
+            DebugTrackStore.filteredCount = filtered.size();
             DebugTrackStore.simplifiedCount = simplified.size();
-            DebugTrackStore.smsLength = sms.length();
-            DebugTrackStore.lastSms = sms;
+
+            DebugTrackStore.smsLength = encoded.length();
+            DebugTrackStore.lastSms = encoded;
         }
+
+        isProcessing = false;
     }
 
     private List<LatLng> convertGpsPointsToLatLng(List<GpsPoint> list) {
@@ -1989,6 +2231,12 @@ public class TxForegroundService extends Service {
 
     private void stopTrackingInternal() {
 
+        isFinalFlush = true; // ?? AGGIUNTA
+
+        // ?? INVIA ULTIMO BATCH
+        processTrackBuffer();
+
+
         trackHandler.removeCallbacks(trackProcessorRunnable);
         synchronized (bufferLock) {
             gpsTrackBuffer.clear();
@@ -2003,7 +2251,7 @@ public class TxForegroundService extends Service {
 
         rxMonitorHandler.removeCallbacksAndMessages(null);
 
-        // 👇 STOP SOLO IL TIMER UI SPECIFICO
+        // ?? STOP SOLO IL TIMER UI SPECIFICO
         if (uiRunnable != null) {
             uiHandler.removeCallbacks(uiRunnable);
         }
@@ -2044,7 +2292,7 @@ public class TxForegroundService extends Service {
         intent.putExtra("timer", timer);
         intent.putExtra("smsCount", smsCount);
 
-        // 🔥 NUOVO EXTRA PER LED GPS
+        // ?? NUOVO EXTRA PER LED GPS
         intent.putExtra("gpsFix", gpsFixValid);
 
         sendBroadcast(intent);
@@ -2083,6 +2331,11 @@ public class TxForegroundService extends Service {
 
     private void sendControlSms(String text) {
 
+        if (multiGpsMode && text.equals("CTRL:STOP")) {
+            Log.d("CTRL", "STOP SMS evitato in MULTIGPS");
+            return;
+        }
+
         SmsDebugManager.logTx(text);
 
         if (smsDebugMode) {
@@ -2103,17 +2356,29 @@ public class TxForegroundService extends Service {
         smsManager.sendTextMessage(phoneNumber, null, text, null, null);
     }
 
+
+
     private void startSignalMonitor() {
 
-        telephonyManager =
-                (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+        // ? Inizializza TelephonyManager prima di usarlo
+        telephonyManager = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
 
+        if (telephonyManager == null) {
+            Log.e("TX_SERVICE", "TelephonyManager is null! Signal monitoring disabled.");
+            return;
+        }
+
+        // ? Crea PhoneStateListener
         signalListener = new PhoneStateListener() {
+
+
             @Override
             public void onSignalStrengthsChanged(SignalStrength signalStrength) {
                 super.onSignalStrengthsChanged(signalStrength);
 
                 try {
+
+                    int lastDbm = lastSignalDbm; // fallback
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 
@@ -2128,10 +2393,8 @@ public class TxForegroundService extends Service {
 
                                 int dbm = css.getDbm();
 
-                                // valore realistico rete mobile
                                 if (dbm < 0 && dbm > -140) {
 
-                                    // prendi il migliore (meno negativo)
                                     if (dbm > bestDbm) {
                                         bestDbm = dbm;
                                     }
@@ -2139,7 +2402,7 @@ public class TxForegroundService extends Service {
                             }
 
                             if (bestDbm != Integer.MIN_VALUE) {
-                                lastSignalDbm = bestDbm;
+                                lastDbm = bestDbm;
                             }
                         }
 
@@ -2148,30 +2411,90 @@ public class TxForegroundService extends Service {
                         int gsm = signalStrength.getGsmSignalStrength();
 
                         if (gsm != 99) {
-                            lastSignalDbm = -113 + 2 * gsm;
+                            lastDbm = -113 + 2 * gsm;
                         }
                     }
 
+                    // ============================
+                    // ?? AGGIORNAMENTO GLOBALE
+                    // ============================
+                    lastSignalDbm = lastDbm;
+
+                    // ============================
+                    // ?? STEP 1 — STATO RETE
+                    // ============================
+                    updateNetworkState(lastSignalDbm);
+
+                    // ============================
+                    // ?? STEP 3 — VECCHIO SISTEMA (mantieni)
+                    // ============================
                     sendSignalUpdate(lastSignalDbm);
 
+                    // ============================
+                    // ?? DEBUG
+                    // ============================
+                    Log.d("NETWORK",
+                            "dbm=" + lastSignalDbm +
+                                    " state=" + currentNetworkState +
+                                    " type=" + getNetworkType());
+
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    Log.e("TX_SERVICE", "Error reading signal", e);
+                }
+            }
+
+
+            @Override
+            public void onServiceStateChanged(ServiceState serviceState) {
+
+                int state = serviceState.getState();
+
+                switch (state) {
+                    case ServiceState.STATE_IN_SERVICE:
+                        networkAvailable = true;
+                        break;
+
+                    default:
+                        networkAvailable = false;
+                        break;
                 }
             }
         };
 
+        // ? Ora registra il listener
         telephonyManager.listen(
                 signalListener,
-                PhoneStateListener.LISTEN_SIGNAL_STRENGTHS
+                PhoneStateListener.LISTEN_SIGNAL_STRENGTHS |
+                        PhoneStateListener.LISTEN_SERVICE_STATE
         );
+
+        Log.d("TX_SERVICE", "Signal monitor started");
     }
+
 
     private void sendSignalUpdate(int dbm) {
 
-        Intent intent = new Intent(ACTION_UPDATE);
-        intent.setPackage(getPackageName());
+        String networkType = getNetworkType();
 
-        intent.putExtra("signalDbm", dbm);
+        NetworkState state;
+
+        if (!networkAvailable) {
+            state = NetworkState.NO_SIGNAL;
+        } else if (dbm < -100) {
+            state = NetworkState.WEAK_SIGNAL;
+        } else {
+            state = NetworkState.ONLINE;
+        }
+
+        currentNetworkState = state;
+
+        Intent intent = new Intent("NETWORK_UPDATE");
+
+        intent.setPackage(getPackageName()); // ? FONDAMENTALE
+
+        intent.putExtra("dbm", dbm);
+        intent.putExtra("type", networkType);
+        intent.putExtra("state", state.name());
 
         sendBroadcast(intent);
     }

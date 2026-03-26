@@ -9,16 +9,27 @@ import com.example.smsgpstracker.tx.PolylineCodec;
 
 public class AdaptiveSmsCompressor {
 
-    private static final int SMS_MAX = 150;
+
     public static int lastEncodedLength = 0;
     public static int lastPoints = 0;
     public static int lastIterations = 0;
 
+    private static int computeSmsLength(String encoded) {
+
+        String payload = "T|" + encoded;
+
+        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+        return sms.length();
+    }
+
     public static CompressionResult compressToSms(
+
             List<LatLng> raw,
             double baseEpsilon,
             double distance,
-            double angle
+            double angle,
+            int dynamicTarget
     ) {
 
         Log.d("ADAPT", "START compression");
@@ -36,52 +47,79 @@ public class AdaptiveSmsCompressor {
 
         int iteration = 0;
 
+        // ================================
+        // 🧠 STEP 4.1 — BEST TRACKING
+        // ================================
+        String bestEncoded = null;
+        int bestLen = Integer.MAX_VALUE;
+        List<LatLng> bestSimplified = null;
+
         while (true) {
 
             iteration++;
 
-            simplified =
-                    TrackSimplifier.simplify(filtered, epsilon);
-
+            simplified = TrackSimplifier.simplify(filtered, epsilon);
             encoded = encode(simplified);
+
+            int smsLength = computeSmsLength(encoded);
 
             Log.d("ADAPT", "Iter " + iteration +
                     " | eps=" + epsilon +
                     " | pts=" + simplified.size() +
-                    " | len=" + encoded.length());
+                    " | encLen=" + encoded.length() +
+                    " | smsLen=" + smsLength +
+                    " | target=" + dynamicTarget);
 
-            // 🎯 TARGET CENTRATO
-            if (encoded.length() <= SMS_MAX) {
+            // ================================
+            // 🎯 STEP 4.2 — SALVA BEST FIT
+            // ================================
+            if (smsLength <= dynamicTarget && smsLength < bestLen) {
+                bestLen = smsLength;
+                bestEncoded = encoded;
+                bestSimplified = simplified;
+            }
 
-                lastEncodedLength = encoded.length();
-                lastPoints = simplified.size();
-                lastIterations = iteration;
-
+            // ================================
+            // 🚨 STOP quando superi il target
+            // ================================
+            if (smsLength > dynamicTarget && bestEncoded != null) {
                 break;
             }
 
-            // aumenta compressione
+            // 🔁 aumenta compressione
             epsilon *= 1.2;
 
-            // sicurezza anti-loop
+            // 🛑 sicurezza anti-loop
             if (iteration > 20) {
                 Log.e("ADAPT", "BREAK SAFETY");
-
-                lastEncodedLength = encoded.length();
-                lastPoints = simplified.size();
-                lastIterations = iteration;
-
                 break;
             }
         }
 
-        Log.d("ADAPT", "FINAL len=" + encoded.length());
+        // ================================
+        // ✅ STEP 4.3 — USA BEST RISULTATO
+        // ================================
+        if (bestEncoded != null) {
+            encoded = bestEncoded;
+            simplified = bestSimplified;
+        }
+
+        // ================================
+        // 📊 STEP 4.4 — METRICHE FINALI
+        // ================================
+        int finalSmsLen = computeSmsLength(encoded);
+
+        lastEncodedLength = finalSmsLen;
+        lastPoints = simplified.size();
+        lastIterations = iteration;
+
+        Log.d("ADAPT", "FINAL SMS len=" + finalSmsLen);
 
         CompressionResult res = new CompressionResult();
 
         res.encoded = encoded;
-        res.finalLength = encoded.length();
-        res.smsCount = 1; // per ora 1 SMS
+        res.finalLength = finalSmsLen;
+        res.smsCount = 1;
         res.usedEpsilon = epsilon;
         res.usedDistance = distance;
 
