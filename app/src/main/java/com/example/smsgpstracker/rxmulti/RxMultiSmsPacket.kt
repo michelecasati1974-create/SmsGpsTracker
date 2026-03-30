@@ -2,9 +2,8 @@ package com.example.smsgpstracker.rxmulti
 
 data class RxMultiSmsPacket(
 
+    val sessionId: String,
     val seq: Int,
-
-    val pointsDeclared: Int,
-
-    val encodedPolyline: String
+    val type: String, // D o F
+    val payload: String
 )

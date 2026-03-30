@@ -59,6 +59,7 @@ public class TxForegroundService extends Service {
     private NetworkState currentNetworkState = NetworkState.NO_SIGNAL;
     private boolean networkAvailable = false;
     private boolean finalSmsSent = false;
+    private boolean isStopping = false;
 
 
     private boolean noSignalAlertEnabled = false;
@@ -81,6 +82,7 @@ public class TxForegroundService extends Service {
     private static final int WINDOW_SIZE = 10;
 
     private final Queue<String> smsQueue = new LinkedList<>();
+
 
 
 
@@ -942,6 +944,7 @@ public class TxForegroundService extends Service {
 
         if (ACTION_START.equals(action)) {
 
+            finalSmsSent = false;
             currentSessionId = generateSessionId();
             currentSeq = 0;
 
@@ -1039,24 +1042,48 @@ public class TxForegroundService extends Service {
             sessionEndTime = System.currentTimeMillis();
 
             // ================================
-            // ?? MULTIGPS ? FINAL FLUSH
+            // 🔥 MULTIGPS → FINAL FLUSH
             // ================================
-            if (multiGpsMode && !finalSmsSent) {
+            if (multiGpsMode) {
 
-                if (gpsTrackBuffer.count() > 0) {
+                // 🔥 BLOCCO GLOBALE ANTI-DOPPIO INVIO
+                if (finalSmsSent) {
+                    Log.d("TRACK", "STOP IGNORED → final SMS already sent");
+                } else {
+
+                    Log.d("TRACK", "STOP → FINAL FLUSH START");
 
                     isFinalFlush = true;
-                    processTrackBuffer();
 
-                    finalSmsSent = true;
+                    if (gpsTrackBuffer.count() > 0) {
+
+                        // 🔥 usa il flusso standard (genera F internamente)
+                        processTrackBuffer();
+
+                    } else {
+
+                        // 🔥 fallback solo se buffer vuoto
+                        currentSeq++;
+
+                        String payload = "TX|" +
+                                currentSessionId + "|" +
+                                currentSeq + "|F|END";
+
+                        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+                        Log.d("SMS_PROTO", sms);
+
+                        sendTrackSms(sms);
+
+                        // 🔥 BLOCCA QUALSIASI INVIO SUCCESSIVO
+                        finalSmsSent = true;
+                    }
                 }
-             else {
-                    Log.d("TRACK", "No points to flush");
-                }
+
             } else {
 
                 // ================================
-                // ?? ALTRE MODALITÀ ? CTRL STOP
+                // ALTRE MODALITÀ
                 // ================================
                 if (phoneNumber != null && !phoneNumber.isEmpty()) {
                     sendControlSms("CTRL:STOP");
@@ -1064,12 +1091,12 @@ public class TxForegroundService extends Service {
             }
 
             // ================================
-            // ?? SALVATAGGIO LOG
+            // SALVATAGGIO LOG
             // ================================
             saveSmsLog();
 
             // ================================
-            // ?? AUTO MODE
+            // AUTO MODE
             // ================================
             if (autoModeEnabled) {
 
@@ -1117,14 +1144,13 @@ public class TxForegroundService extends Service {
             }
 
             // ================================
-            // ?? STOP REALE SERVIZIO
+            // STOP REALE SERVIZIO
             // ================================
             stopTrackingInternal();
 
             saveTxState("IDLE");
 
             stopForeground(true);
-
             stopSelf();
 
             return START_NOT_STICKY;
@@ -1698,9 +1724,17 @@ public class TxForegroundService extends Service {
 
         if (smsDebugMode) return;
 
-        // ================================
-        // ?? LOGICA INTELLIGENTE
-        // ================================
+        // 🔥 PRIORITÀ MASSIMA PER SMS FINALE
+        if (text.contains("|F|")) {
+
+            Log.d("SMS_PROTO", "FORCE SEND FINAL SMS");
+
+            flushQueue();     // invia eventuali SMS in coda
+            sendNow(text);    // invia subito
+
+            return;
+        }
+
         switch (currentNetworkState) {
 
             case ONLINE:
@@ -2071,19 +2105,34 @@ public class TxForegroundService extends Service {
 
     private void processTrackBuffer() {
 
+        Log.d("TRACK", "processTrackBuffer CALLED | final=" + finalSmsSent + " flush=" + isFinalFlush);
+
+        // 🔥 BLOCCO TOTALE DOPO SMS F
+        if (finalSmsSent) {
+            Log.d("TRACK", "BLOCKED: final SMS already sent");
+            return;
+        }
+
         List<GpsPoint> rawPoints;
 
         synchronized (bufferLock) {
             List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
 
-            if (current == null || current.size() < 10) {
+            if (current == null || current.isEmpty()) {
+                return;
+            }
+
+            // 🔥 blocco normale (solo se NON è flush finale)
+            if (!isFinalFlush && current.size() < 10) {
                 return;
             }
 
             rawPoints = new ArrayList<>(current);
         }
 
-        if (!isRunning || !multiGpsMode || isProcessing) return;
+        if (!isRunning || !multiGpsMode || isProcessing) {
+            return;
+        }
 
         isProcessing = true;
         long now = System.currentTimeMillis();
@@ -2149,6 +2198,11 @@ public class TxForegroundService extends Service {
 
             String type = (isFinalFlush && i == totalParts - 1) ? "F" : "D";
 
+            if (type.equals("F")) {
+                finalSmsSent = true;
+                Log.d("TRACK", "FINAL SMS SENT → LOCK ACTIVATED");
+            }
+
             String header = "TX|" +
                     currentSessionId + "|" +
                     currentSeq + "|"+   // 🔥 niente più /tot
@@ -2167,32 +2221,40 @@ public class TxForegroundService extends Service {
             } catch (InterruptedException ignored) {}
         }
 
-        isFinalFlush = false; // reset flag
+        // ================================
+        // FINE PROCESSING
+        // ================================
+
+        // 🔥 RESET FLUSH (ma DOPO aver usato il flag)
+        boolean wasFinalFlush = isFinalFlush;
+        isFinalFlush = false;
+
         lastTrackSmsTime = now;
 
         // ================================
-        // ROLLING BUFFER
+        // ROLLING BUFFER (solo se NON finale)
         // ================================
-        synchronized (bufferLock) {
+        if (!wasFinalFlush) {
+            synchronized (bufferLock) {
 
-            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-            int keep = Math.min(keepPoints, current.size());
+                List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+                int keep = Math.min(keepPoints, current.size());
 
-            List<GpsPoint> tail = new ArrayList<>();
-            for (int i = current.size() - keep; i < current.size(); i++) {
-                tail.add(current.get(i));
-            }
+                List<GpsPoint> tail = new ArrayList<>();
+                for (int i = current.size() - keep; i < current.size(); i++) {
+                    tail.add(current.get(i));
+                }
 
-            gpsTrackBuffer.clear();
-            for (GpsPoint gp : tail) {
-                gpsTrackBuffer.addPoint(gp);
+                gpsTrackBuffer.clear();
+                for (GpsPoint gp : tail) {
+                    gpsTrackBuffer.addPoint(gp);
+                }
             }
         }
 
         // ================================
-        // DEBUG COERENTE
+        // DEBUG
         // ================================
-
         List<LatLng> filtered =
                 BasicFilter.apply(latLngPoints,
                         (float) trackSimplifyDistance,
@@ -2215,7 +2277,18 @@ public class TxForegroundService extends Service {
             DebugTrackStore.lastSms = encoded;
         }
 
+        // ================================
+        // 🔥 SBLOCCO SISTEMA (FONDAMENTALE)
+        // ================================
         isProcessing = false;
+
+        // ================================
+        // STOP DEFINITIVO SOLO SE FINALE
+        // ================================
+        if (wasFinalFlush) {
+            Log.d("TRACK", "FINAL FLUSH COMPLETED");
+            return;
+        }
     }
 
     private List<LatLng> convertGpsPointsToLatLng(List<GpsPoint> list) {

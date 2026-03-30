@@ -34,9 +34,10 @@ import androidx.appcompat.app.AlertDialog
 import android.util.Log
 import com.example.smsgpstracker.rxmulti.RxMultiSmsParser
 import com.example.smsgpstracker.rxmulti.RxMultiTrackAssembler
+import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
 
 
-class RxActivity : AppCompatActivity(), OnMapReadyCallback {
+class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var txtStatus: TextView
     private lateinit var txtCount: TextView
@@ -59,11 +60,10 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private val manualPoints = mutableListOf<LatLng>()
 
-    private val rxAssembler = RxTrackAssembler()
 
+    private val multiParser = RxMultiSmsParser()
 
-
-
+    private val multiAssembler = RxMultiTrackAssembler()
 
 
 
@@ -75,39 +75,52 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         override fun onReceive(context: Context?, intent: Intent?) {
             val msg = intent?.getStringExtra("SMS_BODY") ?: return
 
-
-
             // =====================================================
-            // TRACK SMS (protocollo T#)
+            // MULTI GPS SMS MODE (nuovo protocollo)
             // =====================================================
-            if (msg.startsWith("T#")) {
+            if (msg.startsWith("TX|")) {
 
                 try {
 
-                    val assembler = RxTrackAssembler()
+                    val packet = multiParser.parse(msg) ?: return
 
-                    val points = rxAssembler.processSms(msg)
+                    val result = multiAssembler.process(packet)
 
-                    if (points != null) {
+                    // result può essere:
+                    // - null → in attesa
+                    // - lista punti → COMPLETO
 
-                        for (p in points) {
+                    if (result != null) {
 
-                            val latLng = LatLng(p.first, p.second)
+                        trackPoints.clear()
 
-                            trackPoints.add(latLng)
+                        // 🔥 SALVATAGGIO PER ROTAZIONE
+                        RxMultiTrackRepository.points.clear()
+                        RxMultiTrackRepository.points.addAll(result)
+
+                        for (p in result) {
+                            trackPoints.add(LatLng(p.first, p.second))
                         }
 
-                        Log.d("RX_TRACK", "SMS track ricevuto punti=${points.size}")
+                        Log.d("RX_MULTI", "TRACK COMPLETA punti=${result.size}")
+
+                        txtStatus.text = "Tracking completato"
 
                         if (mapReady) drawAllPoints()
+
+                        if (trackPoints.isNotEmpty()) {
+                            generateFinalSnapshot()
+                        }
                     }
 
                 } catch (e: Exception) {
-                    Log.e("RX_TRACK", "Errore decoding SMS track", e)
+
+                    Log.e("RX_MULTI", "Errore MULTI", e)
                 }
 
                 return
             }
+
 
             Log.d("RX_DEBUG", "SMS RAW: [$msg]")
 
@@ -141,50 +154,15 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 return
             }
+            if (msg.contains("POS MANUALE")) {
 
-            when (msg) {
+                val regex = Regex("""(-?\d+\.\d+),(-?\d+\.\d+)""")
+                val match = regex.find(msg)
 
-                "CTRL:START" -> {
-                    txtStatus.text = "Tracking avviato"
-                    resetMapOnly()
+                if (match != null) {
 
-                    // START servizio tracking interno
-                    val serviceIntent =
-                        Intent(this@RxActivity, RxForegroundService::class.java)
-                    serviceIntent.action = "START_TRACK"
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-
-                    // Mostra subito mappa e overlay CyclOSM se attivo
-                    if (mapReady) {
-                        googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
-                        if (isCycloEnabled) {
-                            cycloOverlay?.remove()
-                            enableMapTilerOverlay()
-                        }
-                    }
-                }
-
-                "CTRL:STOP", "CTRL:END" -> {
-                    txtStatus.text = "Tracking completato"
-
-                    val serviceIntent =
-                        Intent(this@RxActivity, RxForegroundService::class.java)
-                    serviceIntent.action = "END_TRACK"
-                    startService(serviceIntent)
-
-                    if (trackPoints.isNotEmpty()) {
-                        generateFinalSnapshot()
-                    }
-                }
-
-                "GPS_MANUAL" -> {
-
-                    val lat = intent.getDoubleExtra("lat", 0.0)
-                    val lon = intent.getDoubleExtra("lon", 0.0)
+                    val lat = match.groupValues[1].toDouble()
+                    val lon = match.groupValues[2].toDouble()
 
                     val point = LatLng(lat, lon)
 
@@ -194,26 +172,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     if (mapReady) drawAllPoints()
                 }
 
-
-
-                "GPS" -> {
-                    val lat = intent.getDoubleExtra("lat", 0.0)
-                    val lon = intent.getDoubleExtra("lon", 0.0)
-                    val point = LatLng(lat, lon)
-                    trackPoints.add(point)
-
-                    if (mapReady) {
-                        drawAllPoints()
-                    }
-
-                    // Invia anche al servizio RxForegroundService
-                    val serviceIntent =
-                        Intent(this@RxActivity, RxForegroundService::class.java)
-                    serviceIntent.action = "ADD_POINT"
-                    serviceIntent.putExtra("lat", lat)
-                    serviceIntent.putExtra("lon", lon)
-                    startService(serviceIntent)
-                }
+                return
             }
         }
     }
@@ -224,7 +183,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_rx)
+        setContentView(R.layout.activity_rx_multi)
 
         prefs = getSharedPreferences("map_settings", MODE_PRIVATE)
         selectedMapProvider = prefs.getString("provider", "GOOGLE")!!
@@ -264,7 +223,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         onBackPressedDispatcher.addCallback(this) {
 
-            AlertDialog.Builder(this@RxActivity)
+            AlertDialog.Builder(this@RxMultiActivity)
                 .setTitle("Chiudere modalità RX?")
                 .setMessage("Il tracking è attivo. Vuoi davvero uscire?")
                 .setPositiveButton("SI") { _, _ ->
@@ -287,20 +246,6 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
 
-        // =====================================
-        // IMPORTA PUNTI DAL REPOSITORY SMS
-        // =====================================
-        if (TrackRepository.points.isNotEmpty()) {
-
-            trackPoints.clear()
-
-            for (p in TrackRepository.points) {
-
-                val latLng = LatLng(p.first, p.second)
-
-                trackPoints.add(latLng)
-            }
-        }
 
         // =====================================
         // DISEGNA TRACCIA
@@ -314,6 +259,17 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         // =====================================
         if (selectedMapProvider == "MAPTILER") {
             enableMapTilerOverlay()
+        }
+
+        if (RxMultiTrackRepository.points.isNotEmpty()) {
+
+            trackPoints.clear()
+
+            for (p in RxMultiTrackRepository.points) {
+                trackPoints.add(LatLng(p.first, p.second))
+            }
+
+            drawAllPoints()
         }
     }
 
@@ -670,5 +626,4 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
         }
     }
 }
-
 

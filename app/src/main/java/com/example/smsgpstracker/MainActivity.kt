@@ -42,6 +42,12 @@ class MainActivity : AppCompatActivity() {
 
         val btnTx = findViewById<Button>(R.id.btnTx)
         val btnRx = findViewById<Button>(R.id.btnRx)
+        val btnRxMulti = findViewById<Button>(R.id.btnRxMulti)
+
+        btnRxMulti.setOnClickListener {
+            Toast.makeText(this, "RX MULTIGPS attivo", Toast.LENGTH_SHORT).show()
+            startActivity(Intent(this, RxMultiActivity::class.java))
+        }
 
         btnTx.setOnClickListener {
             startActivity(Intent(this, TxActivity::class.java))

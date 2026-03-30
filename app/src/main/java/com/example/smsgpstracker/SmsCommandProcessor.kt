@@ -18,6 +18,15 @@ object SmsCommandProcessor {
 
         val text = body.trim()
 
+        // =========================
+        // MULTIGPS RAW (NUOVO)
+        // =========================
+        if (text.startsWith("TX|")) {
+
+            sendInternalBroadcastRaw(context, text)
+            return
+        }
+
         Log.d("RX_PROCESS", "SMS ricevuto: $text")
 
         // =========================
@@ -152,6 +161,27 @@ object SmsCommandProcessor {
         }
 
         Log.d("RX_FLOW", "Broadcast interno inviato: $type")
+
+        appContext.sendBroadcast(intent)
+    }
+
+    private fun sendInternalBroadcastRaw(
+        context: Context,
+        rawMessage: String
+    ) {
+
+        val appContext = context.applicationContext
+
+        val intent = Intent(ACTION_SMS_EVENT).apply {
+
+            setPackage(appContext.packageName)
+
+            putExtra("SMS_BODY", rawMessage)
+
+            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+        }
+
+        Log.d("RX_FLOW", "Broadcast RAW inviato: $rawMessage")
 
         appContext.sendBroadcast(intent)
     }
