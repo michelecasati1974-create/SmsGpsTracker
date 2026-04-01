@@ -61,6 +61,41 @@
                     android:textSize="16sp"
                     android:layout_marginBottom="12dp" />
 
+
+                <EditText
+                    android:id="@+id/edtHelpMeTime"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Tempo inattività Help Me (sec)"
+                    android:inputType="number"
+                    android:minHeight="48dp"
+                    android:padding="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Tempo controllo utente per possibile infortuni - Nessun movimento"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="4dp"/>
+
+                <EditText
+                    android:id="@+id/edtMovementThreshold"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Soglia movimento (metri)"
+                    android:inputType="numberDecimal"
+                    android:minHeight="48dp"
+                    android:padding="12dp"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Definisci il numero di metri per considerare movimento"
+                    android:textSize="11sp"
+                    android:textColor="#666666"
+                    android:layout_marginBottom="4dp"/>
+
                 <EditText
                     android:id="@+id/edtNoSignalTc"
                     android:layout_width="match_parent"

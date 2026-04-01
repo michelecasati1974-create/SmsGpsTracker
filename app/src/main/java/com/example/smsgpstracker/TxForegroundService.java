@@ -62,6 +62,13 @@ public class TxForegroundService extends Service {
     private boolean isStopping = false;
 
 
+    private long helpMeThresholdMs = 0;
+
+    private float movementThreshold = 35f; // default
+
+    private LatLng lastReferencePoint = null;
+
+
     private boolean noSignalAlertEnabled = false;
 
     private long noSignalStartTime = 0;
@@ -69,6 +76,9 @@ public class TxForegroundService extends Service {
 
     private int noSignalTc = 10; // sec
     private int vibrationTs = 3; // sec
+    private long lastMovementTime = 0;
+    private Location lastMovementLocation = null;
+    private long helpMeTimeMs = 120000;
 
 
 
@@ -129,7 +139,6 @@ public class TxForegroundService extends Service {
     private long monitorIntervalMs = 5000;
     private Handler signalHandler = new Handler(Looper.getMainLooper());
     private Runnable signalPollRunnable;
-    private long lastMovementTime = 0;
     private boolean stopMode = false;
     private boolean gpsFixValid = false;
     private boolean continuousMode = false;
@@ -643,6 +652,65 @@ public class TxForegroundService extends Service {
         return Math.toDegrees(Math.acos(cos));
     }
 
+    private void checkNoMovement(LatLng current) {
+
+        if (lastReferencePoint == null) {
+            lastReferencePoint = current;
+            lastMovementTime = System.currentTimeMillis();
+            return;
+        }
+
+        float[] result = new float[1];
+        Location.distanceBetween(
+                lastReferencePoint.latitude,
+                lastReferencePoint.longitude,
+                current.latitude,
+                current.longitude,
+                result
+        );
+
+        float distance = result[0];
+        long now = System.currentTimeMillis();
+
+        if (distance < 3) {
+            long elapsed = now - lastMovementTime;
+
+            if (elapsed >= helpMeThresholdMs) {
+
+                Log.d("EMERGENCY", "NO MOVEMENT DETECTED");
+
+                Location tmp = new Location("emergency");
+                tmp.setLatitude(current.latitude);
+                tmp.setLongitude(current.longitude);
+
+                sendEmergencySms(tmp);
+
+                // reset per evitare spam
+                lastMovementTime = now;
+            }
+
+        } else {
+            // movimento rilevato → reset
+            lastReferencePoint = current;
+            lastMovementTime = now;
+        }
+    }
+
+
+    private void sendEmergencySms(Location loc) {
+
+        if (loc == null) return;
+
+        String payload = "CTRL|EMERGENCY|" +
+                loc.getLatitude() + "," +
+                loc.getLongitude();
+
+        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+        Log.d("SMS_PROTO", sms);
+
+        sendTrackSms(sms);
+    }
 
     private void startContinuousGps() {
 
@@ -668,18 +736,74 @@ public class TxForegroundService extends Service {
 
                 // IGNORA PRIMO FIX (spesso cached)
                 if (ignoreFirstGpsFix) {
-
                     ignoreFirstGpsFix = false;
                     Log.d("GPS_FILTER", "Ignoring first cached fix");
-
                     return;
                 }
 
                 Location loc = result.getLastLocation();
                 if (loc == null) return;
 
-                updateAdaptiveGpsInterval(loc);
+                // =====================================
+                // 🔴 NO MOVEMENT CHECK (ROBUSTO)
+                // =====================================
 
+                if (loc.hasAccuracy() && loc.getAccuracy() <= 30) {
+
+                    final float MOVEMENT_THRESHOLD = 35f; // 🔥 35 metri
+
+                    long now = System.currentTimeMillis();
+
+                    if (lastMovementLocation != null) {
+
+                        float dist = loc.distanceTo(lastMovementLocation);
+
+                        if (dist > MOVEMENT_THRESHOLD) {
+
+                            Log.d("HELP_ME", "REAL MOVE: " + dist + " m");
+
+                            lastMovementTime = now;
+                            lastMovementLocation = loc;
+
+                        } else {
+
+                            Log.d("HELP_ME", "JITTER: " + dist + " m");
+
+                        }
+
+                    } else {
+
+                        lastMovementLocation = loc;
+                        lastMovementTime = now;
+                    }
+
+                    // ⏱ controllo tempo immobilità
+                    long elapsed = now - lastMovementTime;
+
+                    Log.d("HELP_ME_DEBUG",
+                            "elapsed=" + elapsed +
+                                    " threshold=" + helpMeTimeMs +
+                                    " acc=" + loc.getAccuracy()
+                    );
+
+                    if (elapsed > helpMeTimeMs) {
+
+                        Log.d("HELP_ME", "🚨 NO MOVEMENT DETECTED");
+
+                        sendEmergencySms(loc);
+
+                        lastMovementTime = now; // 🔥 anti-spam
+                    }
+
+                } else {
+                    Log.d("HELP_ME", "SKIP LOW ACCURACY");
+                }
+
+                // =====================================
+                // 🔧 RESTO DEL TUO CODICE (UGUALE)
+                // =====================================
+
+                updateAdaptiveGpsInterval(loc);
                 // FIX doppio GPS allo START
                 if (!firstGpsFixSent) {
                     firstGpsFixSent = true;
@@ -763,6 +887,7 @@ public class TxForegroundService extends Service {
                 // =====================================
 
                 GpsPoint p = new GpsPoint(ts, lat, lon, acc);
+
 
                 // =====================================
                 // REALTIME MODE (no buffer)
@@ -926,6 +1051,8 @@ public class TxForegroundService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 
+
+
         noSignalAlertEnabled = intent.getBooleanExtra("noSignalAlert", false);
 
         // 🔥 leggi anche da SharedPreferences
@@ -933,6 +1060,10 @@ public class TxForegroundService extends Service {
 
         noSignalTc = prefs.getInt("noSignalTc", 10);
         vibrationTs = prefs.getInt("vibrationTs", 3);
+        int helpSec = prefs.getInt("help_me_time", 120); // default 2 min
+        helpMeThresholdMs = helpSec * 1000L;
+        helpMeTimeMs = prefs.getInt("helpMeTime", 120) * 1000L;
+        movementThreshold = prefs.getFloat("movementThreshold", 35f);
 
         Log.d("TX_SERVICE", "Service started");
 
@@ -1197,8 +1328,8 @@ public class TxForegroundService extends Service {
                 getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
 
         // ================================
-// ?? PARAMETRI MULTI GPS
-// ================================
+        // ?? PARAMETRI MULTI GPS
+        // ================================
 
         float simplifyTolerance =
                 prefs.getFloat("multi_simplify_tolerance", 0.00005f);

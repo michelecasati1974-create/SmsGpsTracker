@@ -29,6 +29,8 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var switchAutoMode: Switch
 
     private lateinit var btnTrainGpx: Button
+    private lateinit var edtHelpMeTime: EditText
+    private lateinit var edtMovementThreshold: EditText
 
 
 
@@ -64,6 +66,8 @@ class SettingsActivity : AppCompatActivity() {
         btnCancelSettings = findViewById(R.id.btnCancelSettings)
         edtNoSignalTc = findViewById(R.id.edtNoSignalTc)
         edtVibrationTs = findViewById(R.id.edtVibrationTs)
+        edtHelpMeTime = findViewById(R.id.edtHelpMeTime)
+        edtMovementThreshold = findViewById(R.id.edtMovementThreshold)
 
 
         // UNA sola SharedPreferences
@@ -72,7 +76,10 @@ class SettingsActivity : AppCompatActivity() {
         // Caricamento valori Tc e Ts
         val savedTc = prefs.getInt("noSignalTc", 10)
         val savedTs = prefs.getInt("vibrationTs", 3)
-
+        val savedHelpMe = prefs.getInt("helpMeTime", 120)
+        val movement = prefs.getFloat("movementThreshold", 35f)
+        edtMovementThreshold.setText(movement.toString())
+        edtHelpMeTime.setText(savedHelpMe.toString())
         edtNoSignalTc.setText(savedTc.toString())
         edtVibrationTs.setText(savedTs.toString())
 
@@ -99,6 +106,19 @@ class SettingsActivity : AppCompatActivity() {
 
             val Tc = edtNoSignalTc.text.toString().toIntOrNull() ?: 10
             val Ts = edtVibrationTs.text.toString().toIntOrNull() ?: 3
+            val helpMe = edtHelpMeTime.text.toString().toIntOrNull() ?: 120
+            val movement = edtMovementThreshold.text.toString().toFloatOrNull() ?: 35f
+
+
+            if (helpMe !in 30..3600) {
+                Toast.makeText(this, "HelpMe deve essere tra 30 e 3600 sec", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+
+            if (movement !in 5f..100f) {
+                Toast.makeText(this, "Soglia movimento 5–100 m", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
 
             if (Tc !in 1..300) {
                 Toast.makeText(this, "Tc deve essere tra 1 e 300 sec", Toast.LENGTH_LONG).show()
@@ -113,6 +133,8 @@ class SettingsActivity : AppCompatActivity() {
             prefs.edit()
                 .putInt("noSignalTc", Tc)
                 .putInt("vibrationTs", Ts)
+                .putInt("helpMeTime", helpMe)
+                .putFloat("movementThreshold", movement)
                 .apply()
 
             saveSettings()

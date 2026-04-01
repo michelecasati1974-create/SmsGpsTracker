@@ -46,9 +46,20 @@ object SmsCommandProcessor {
                     context,
                     "GPS_MANUAL",
                     lat,
-                    lon
+                    lon,
+                    raw = text
                 )
             }
+
+            return
+        }
+        if (text.startsWith("CTRL|EMERGENCY")) {
+
+            sendInternalBroadcast(
+                context,
+                "EMERGENCY",
+                raw = text
+            )
 
             return
         }
@@ -141,7 +152,8 @@ object SmsCommandProcessor {
         context: Context,
         type: String,
         lat: Double? = null,
-        lon: Double? = null
+        lon: Double? = null,
+        raw: String? = null
     ) {
 
         val appContext = context.applicationContext
@@ -155,6 +167,9 @@ object SmsCommandProcessor {
             if (lat != null && lon != null) {
                 putExtra("lat", lat)
                 putExtra("lon", lon)
+            }
+            if (raw != null) {
+                putExtra("RAW_SMS", raw)   // 👈 NUOVO
             }
 
             addFlags(Intent.FLAG_RECEIVER_FOREGROUND)

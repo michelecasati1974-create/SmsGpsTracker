@@ -11,7 +11,7 @@ class RxMultiTrackAssembler {
 
     private val sessions = mutableMapOf<String, SessionBuffer>()
 
-    fun process(packet: RxMultiSmsPacket): List<Pair<Double, Double>>? {
+    fun process(packet: RxMultiSmsPacket): List<Pair<Double, Double>> {
 
         val session = sessions.getOrPut(packet.sessionId) {
             SessionBuffer()
@@ -24,16 +24,33 @@ class RxMultiTrackAssembler {
             session.packets[packet.seq] = packet
         }
 
+        // =========================
+        // 📡 REALTIME (SEMPRE)
+        // =========================
+        val decodedNow = PolylineCodec.decode(packet.payload)
+
+        // =========================
+        // 🏁 FINALE
+        // =========================
         if (packet.type == "F") {
+
             session.isFinalReceived = true
+
+            val full = tryReconstruct(packet.sessionId)
+
+            if (full != null) {
+                return full   // 🔥 traccia completa
+            }
         }
 
-        if (!session.isFinalReceived) {
-            return null
-        }
+        // =========================
+        // 🔁 DEFAULT: ritorna segmento corrente
+        // =========================
+        return decodedNow
+    }
 
-        // prova ricostruzione
-        return tryReconstruct(packet.sessionId)
+    fun decodeSingle(packet: RxMultiSmsPacket): List<Pair<Double, Double>> {
+        return PolylineCodec.decode(packet.payload)
     }
 
     private fun tryReconstruct(sessionId: String): List<Pair<Double, Double>>? {
