@@ -86,4 +86,19 @@ class RxMultiTrackAssembler {
 
         return allPoints   // ✅ CORRETTO
     }
+    fun getPartialTrack(sessionId: String): List<Pair<Double, Double>> {
+
+        val session = sessions[sessionId] ?: return emptyList()
+
+        val ordered = session.packets.toSortedMap()
+
+        val result = mutableListOf<Pair<Double, Double>>()
+
+        ordered.values.forEach { packet ->
+            val decoded = PolylineCodec.decode(packet.payload)
+            result.addAll(decoded)
+        }
+
+        return result
+    }
 }

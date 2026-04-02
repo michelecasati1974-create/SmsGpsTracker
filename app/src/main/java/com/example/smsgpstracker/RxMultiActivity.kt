@@ -32,6 +32,7 @@ import android.util.Log
 import com.example.smsgpstracker.rxmulti.RxMultiSmsParser
 import com.example.smsgpstracker.rxmulti.RxMultiTrackAssembler
 import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
+import com.example.smsgpstracker.rxmulti.RxMultiExtraRepository
 
 
 class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
@@ -63,6 +64,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     private val multiAssembler = RxMultiTrackAssembler()
     private val emergencyPoints = mutableListOf<LatLng>()
     private var emergencyBlink = false
+    private val manualMarkers = mutableListOf<Marker>()
+    private var firstCameraMove = true
 
 
 
@@ -87,7 +90,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                 Log.d("DEBUG_EMERGENCY", "RAW: $raw")
 
                 try {
-                    val parts = raw.split("|")
+                    val parts = raw.split("\\|")
 
                     if (parts.size >= 3) {
 
@@ -100,22 +103,15 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                         // ✔ salva
                         emergencyPoints.add(point)
+                        RxMultiExtraRepository.emergency.add(point)
 
                         Log.d("DEBUG_EMERGENCY", "AGGIUNTO: $lat,$lon")
                         Log.d("DEBUG_EMERGENCY", "SIZE: ${emergencyPoints.size}")
 
                         // 🔴 MARKER REALTIME
                         if (mapReady) {
+                            updateEmergencyMarkers()
 
-                            googleMap.addMarker(
-                                MarkerOptions()
-                                    .position(point)
-                                    .title("🚨 EMERGENCY")
-                                    .snippet("${"%.6f".format(lat)}, ${"%.6f".format(lon)}")
-                                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-                            )
-
-                            // 🔥 ZOOM AUTOMATICO
                             googleMap.animateCamera(
                                 CameraUpdateFactory.newLatLngZoom(point, 17f)
                             )
@@ -151,21 +147,14 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                         // ✔ salva
                         manualPoints.add(point)
+                        RxMultiExtraRepository.manual.add(point)
+
 
                         Log.d("DEBUG_MANUAL", "AGGIUNTO: $lat,$lon")
                         Log.d("DEBUG_MANUAL", "SIZE: ${manualPoints.size}")
 
                         // 🟡 MARKER REALTIME
-                        if (mapReady) {
-
-                            googleMap.addMarker(
-                                MarkerOptions()
-                                    .position(point)
-                                    .title("Posizione manuale")
-                                    .snippet("${"%.6f".format(lat)}, ${"%.6f".format(lon)}")
-                                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
-                            )
-                        }
+                        if (mapReady) drawAllPoints()
 
                     } else {
                         Log.e("DEBUG_MANUAL", "REGEX NON MATCHA")
@@ -189,43 +178,38 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                     val packet = multiParser.parse(type) ?: return
 
-                    // 🔥 1. DECODIFICA SEMPRE IL CHUNK (REALTIME)
-                    val partialPoints = multiAssembler.decodeSingle(packet)
+                    // 🔥 AGGIORNA SESSIONE
+                    multiAssembler.process(packet)
 
-                    partialPoints.forEach { p ->
-                        trackPoints.add(LatLng(p.first, p.second))
-                    }
+                    // 🔥 PRENDI SEMPRE TRACK COMPLETA (parziale o finale)
+                    val partial = multiAssembler.getPartialTrack(packet.sessionId)
 
-                    Log.d("RX_MULTI", "REALTIME punti aggiunti: ${partialPoints.size}")
-
-                    if (mapReady) drawAllPoints()
-
-                    // 🔥 2. GESTIONE FINALE
-                    val result = multiAssembler.process(packet)
-
-                    if (result != null) {
-
-                        Log.d("RX_MULTI", "TRACK COMPLETA")
+                    if (partial.isNotEmpty()) {
 
                         trackPoints.clear()
 
-                        RxMultiTrackRepository.points.clear()
-                        RxMultiTrackRepository.points.addAll(result)
-
-                        result.forEach { p ->
-                            trackPoints.add(LatLng(p.first, p.second))
+                        partial.forEach {
+                            trackPoints.add(LatLng(it.first, it.second))
                         }
 
-                        txtStatus.text = "Tracking completato"
+                        // 🔥🔥 AGGIUNGI QUESTO BLOCCO
+                        RxMultiTrackRepository.points.clear()
+                        RxMultiTrackRepository.points.addAll(partial)
+                        // 🔥🔥 FINE FIX
 
                         if (mapReady) drawAllPoints()
 
-                        if (trackPoints.isNotEmpty()) {
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                generateFinalSnapshot()
-                            }, 1000)
+                        txtStatus.text =
+                            if (packet.type == "F") "Tracking completato"
+                            else "RX ATTIVO"
+                    }
+
+                    // 🔥 SNAPSHOT SOLO SE F
+                    if (packet.type == "F" && trackPoints.isNotEmpty()) {
+
+                        Handler(mainLooper).postDelayed({
                             generateFinalSnapshot()
-                        }
+                        }, 2000)
                     }
 
                 } catch (e: Exception) {
@@ -244,20 +228,46 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun startEmergencyBlink() {
 
-        val handler = android.os.Handler(mainLooper)
+        val handler = Handler(mainLooper)
 
         val runnable = object : Runnable {
             override fun run() {
 
                 emergencyBlink = !emergencyBlink
 
-                if (mapReady) drawAllPoints()
+                // ❌ NON ridisegnare tutta la mappa!
+                // aggiorna solo marker emergency
 
-                handler.postDelayed(this, 500) // lampeggio ogni 500ms
+                updateEmergencyMarkers()
+
+                handler.postDelayed(this, 1000) // più lento = meno stress
             }
         }
 
         handler.post(runnable)
+    }
+
+    private var emergencyMarkers = mutableListOf<Marker>()
+
+    private fun updateEmergencyMarkers() {
+
+        // rimuovi vecchi
+        emergencyMarkers.forEach { it.remove() }
+        emergencyMarkers.clear()
+
+        if (!emergencyBlink) return
+
+        emergencyPoints.forEach { point ->
+
+            val marker = googleMap.addMarker(
+                MarkerOptions()
+                    .position(point)
+                    .title("🚨 EMERGENCY")
+                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+            )
+
+            if (marker != null) emergencyMarkers.add(marker)
+        }
     }
 
 
@@ -354,30 +364,40 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
 
+        // =====================================
+        // 🔥 1. RIPRISTINO DATI (ROTATION SAFE)
+        // =====================================
 
-        // =====================================
-        // DISEGNA TRACCIA
-        // =====================================
-        if (trackPoints.isNotEmpty()) {
-            drawAllPoints()
+        // TRACK
+        trackPoints.clear()
+        RxMultiTrackRepository.points.forEach {
+            trackPoints.add(LatLng(it.first, it.second))
         }
 
-        // =====================================
-        // OVERLAY MAPTILER
-        // =====================================
+        // MANUAL
+        manualPoints.clear()
+        manualPoints.addAll(RxMultiExtraRepository.manual)
+
+        // EMERGENCY
+
+        emergencyPoints.clear()
+        updateEmergencyMarkers()
+        emergencyPoints.addAll(RxMultiExtraRepository.emergency)
+
         if (selectedMapProvider == "MAPTILER") {
+
             enableMapTilerOverlay()
-        }
 
-        if (RxMultiTrackRepository.points.isNotEmpty()) {
+            Handler(mainLooper).postDelayed({
+                if (trackPoints.isNotEmpty()) {
+                    drawAllPoints()
+                }
+            }, 800)
 
-            trackPoints.clear()
-
-            for (p in RxMultiTrackRepository.points) {
-                trackPoints.add(LatLng(p.first, p.second))
+        } else {
+            if (trackPoints.isNotEmpty()) {
+                drawAllPoints()
             }
-
-            drawAllPoints()
         }
     }
 
@@ -388,71 +408,78 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         if (!mapReady || trackPoints.isEmpty()) return
 
-        // 🔥 IMPORTANTE: pulisce tutto (necessario per lampeggio)
-        googleMap.clear()
+        // ❌ NON usare più clear()
+        // googleMap.clear()
 
         // =========================
-        // 📍 POLYLINE
+        // 📍 POLYLINE (aggiorna invece di ricreare)
         // =========================
-        trackPolyline = googleMap.addPolyline(
-            PolylineOptions()
-                .addAll(trackPoints)
-                .width(6f)
-                .color(Color.BLACK)
-        )
+        if (trackPolyline == null) {
+            trackPolyline = googleMap.addPolyline(
+                PolylineOptions()
+                    .addAll(trackPoints)
+                    .width(6f)
+                    .color(Color.BLACK)
+            )
+        } else {
+            if (trackPolyline?.points?.size != trackPoints.size) {
+                trackPolyline?.points = trackPoints
+            }
+        }
 
         // =========================
         // 🔴 ULTIMO PUNTO
         // =========================
         val last = trackPoints.last()
 
-        lastMarker = googleMap.addMarker(
-            MarkerOptions()
-                .position(last)
-                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-        )
+        if (lastMarker == null) {
+            lastMarker = googleMap.addMarker(
+                MarkerOptions()
+                    .position(last)
+                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+            )
+        } else {
+            lastMarker?.position = last
+        }
 
         // =========================
-        // ⭐ MANUAL POINTS (sempre visibili)
+        // ⭐ MANUAL POINTS (NO DUPLICATI)
         // =========================
+        // pulisci vecchi
+        manualMarkers.forEach { it.remove() }
+        manualMarkers.clear()
+
         manualPoints.forEach { point ->
 
-            googleMap.addMarker(
+            val marker = googleMap.addMarker(
                 MarkerOptions()
                     .position(point)
                     .title("⭐ Posizione manuale")
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
             )
+
+            if (marker != null) manualMarkers.add(marker)
         }
 
-        // =========================
-        // 🚨 EMERGENCY (LAMPEGGIO)
-        // =========================
-        emergencyPoints.forEach { point ->
 
-            if (emergencyBlink) {
 
-                googleMap.addMarker(
-                    MarkerOptions()
-                        .position(point)
-                        .title("🚨 EMERGENCY")
-                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-                )
-            }
+        // =========================
+        // 📦 CAMERA (solo all'inizio!)
+        // =========================
+        if (firstCameraMove) {
+
+            val builder = LatLngBounds.Builder()
+
+            trackPoints.forEach { builder.include(it) }
+            manualPoints.forEach { builder.include(it) }
+            emergencyPoints.forEach { builder.include(it) }
+
+            googleMap.animateCamera(
+                CameraUpdateFactory.newLatLngBounds(builder.build(), 150)
+            )
+
+            firstCameraMove = false
         }
-
-        // =========================
-        // 📦 CAMERA
-        // =========================
-        val builder = LatLngBounds.Builder()
-
-        trackPoints.forEach { builder.include(it) }
-        manualPoints.forEach { builder.include(it) }
-        emergencyPoints.forEach { builder.include(it) }
-
-        googleMap.animateCamera(
-            CameraUpdateFactory.newLatLngBounds(builder.build(), 150)
-        )
 
         // =========================
         // 📊 UI
@@ -512,6 +539,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     // RESET MAP
     // =====================================================
     private fun resetMapOnly() {
+        RxMultiExtraRepository.manual.clear()
+        RxMultiExtraRepository.emergency.clear()
         trackPoints.clear()
         trackPolyline?.remove()
         lastMarker?.remove()
@@ -554,14 +583,14 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         googleMap.animateCamera(
             CameraUpdateFactory.newLatLngBounds(bounds, 150),
-            1200,
+            3000,
             object : GoogleMap.CancelableCallback {
 
                 override fun onFinish() {
 
                     Handler(Looper.getMainLooper()).postDelayed({
                         takeSnapshotSafely()
-                    }, 1200)
+                    }, 2000) // più tempo per MapTiler
 
                 }
 
