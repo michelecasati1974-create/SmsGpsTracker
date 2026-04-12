@@ -35,6 +35,14 @@ import java.util.Deque;
 import java.util.ArrayDeque;
 import android.telephony.ServiceState;
 import java.util.Queue;
+import android.util.Base64;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
+import android.os.Build;
+import androidx.core.content.ContextCompat;
+
 
 
 
@@ -55,6 +63,7 @@ public class TxForegroundService extends Service {
         NO_SIGNAL,
         RECOVERY
     }
+    private final AtomicBoolean finalFlushStarted = new AtomicBoolean(false);
     private SignalLevel currentSignalLevel = SignalLevel.NO_SIGNAL;
     private NetworkState currentNetworkState = NetworkState.NO_SIGNAL;
     private boolean networkAvailable = false;
@@ -92,6 +101,7 @@ public class TxForegroundService extends Service {
     private static final int WINDOW_SIZE = 10;
 
     private final Queue<String> smsQueue = new LinkedList<>();
+    private final Object processingLock = new Object();
 
 
 
@@ -118,6 +128,8 @@ public class TxForegroundService extends Service {
     private String phoneNumber = "";
     private long cycleStartTime = 0;
     private long nextTickTime = 0;
+    private HandlerThread txThread = new HandlerThread("TX_SMS");
+    private Handler txHandler;
 
 
     private boolean vibrationTriggered = false;
@@ -176,6 +188,14 @@ public class TxForegroundService extends Service {
     private Location lastDistanceLocation = null;
     private final Object bufferLock = new Object();
     private long multiSendIntervalMs;
+
+    private String encodeBase64(String input) {
+        return Base64.encodeToString(
+                input.getBytes(StandardCharsets.UTF_8),
+                Base64.URL_SAFE | Base64.NO_WRAP
+        );
+    }
+
 
     // =======================
     // SMS PROTOCOLLO
@@ -247,6 +267,7 @@ public class TxForegroundService extends Service {
     }
 
     private void updateNetworkState(int dbm) {
+
         handleNoSignalAlert(currentNetworkState);
 
         NetworkState previous = currentNetworkState;
@@ -261,11 +282,24 @@ public class TxForegroundService extends Service {
             currentNetworkState = NetworkState.ONLINE;
         }
 
-        // ?? rileva recovery
+        // 🔥 RILEVA RECOVERY
         if (previous == NetworkState.NO_SIGNAL &&
                 currentNetworkState != NetworkState.NO_SIGNAL) {
 
             currentNetworkState = NetworkState.RECOVERY;
+
+            Log.d("SMS_QUEUE", "RECOVERY DETECTED → FLUSH");
+
+            flushQueue(); // 🔥 QUI
+        }
+
+        // 🔥 EXTRA SICUREZZA (consigliato)
+        if (currentNetworkState == NetworkState.ONLINE &&
+                !smsQueue.isEmpty()) {
+
+            Log.d("SMS_QUEUE", "ONLINE + QUEUE → FLUSH");
+
+            flushQueue(); // 🔥 QUI
         }
     }
 
@@ -296,28 +330,123 @@ public class TxForegroundService extends Service {
     }
 
     private void queueSms(String sms) {
-        smsQueue.add(sms);
-        Log.d("SMS", "Queued (no signal)");
+
+        if (!smsQueue.contains(sms)) {
+            smsQueue.add(sms);
+            Log.d("SMS_QUEUE", "Queued size=" + smsQueue.size());
+        } else {
+            Log.w("SMS_QUEUE", "DUPLICATO IGNORATO");
+        }
     }
 
     private void flushQueue() {
 
-        Log.d("SMS", "Flushing queue: " + smsQueue.size());
+        if (smsQueue.isEmpty()) {
+            Log.d("SMS_QUEUE", "Queue vuota");
+            return;
+        }
 
-        while (!smsQueue.isEmpty()) {
+        Log.d("SMS_QUEUE", "FLUSH START size=" + smsQueue.size());
 
-            String msg = smsQueue.poll();
+        List<String> copy = new ArrayList<>(smsQueue);
+        smsQueue.clear();
 
-            sendNow(msg);
+        for (int i = 0; i < copy.size(); i++) {
 
-            try { Thread.sleep(300); } catch (Exception ignored) {}
+            String sms = copy.get(i);
+
+            int delay = i * 500;
+
+            handler.postDelayed(() -> {
+                sendNow(sms);
+            }, delay);
         }
     }
 
     private void sendNow(String text) {
 
-        SmsManager.getDefault().sendTextMessage(
-                phoneNumber, null, text, null, null);
+        SmsManager smsManager = SmsManager.getDefault();
+
+        Intent sentIntent = new Intent("SMS_SENT_ACTION");
+        sentIntent.putExtra("text", text);
+        sentIntent.putExtra("retry", 0);
+
+        PendingIntent sentPI = PendingIntent.getBroadcast(
+                this,
+                (int) System.currentTimeMillis(),
+                sentIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        smsManager.sendTextMessage(
+                phoneNumber,
+                null,
+                text,
+                sentPI,
+                null
+        );
+    }
+
+    private final BroadcastReceiver smsSentReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+
+            String text = intent.getStringExtra("text");
+            int retry = intent.getIntExtra("retry", 0);
+
+            switch (getResultCode()) {
+
+                case Activity.RESULT_OK:
+                    Log.d("SMS_RETRY", "SMS OK");
+                    break;
+
+                default:
+                    Log.w("SMS_RETRY", "SMS FAILED → retry=" + retry);
+
+                    if (retry < 3) {
+
+                        int delay = (int) Math.pow(2, retry) * 2000;
+
+                        handler.postDelayed(() -> {
+                            retrySend(text, retry + 1);
+                        }, delay);
+
+                    } else {
+
+                        Log.e("SMS_RETRY", "RETRY FALLITI → METTO IN CODA");
+
+                        // 🔥 NON PERDERE SMS
+                        queueSms(text);
+                    }
+                    break;
+            }
+        }
+    };
+
+    private void retrySend(String text, int retry) {
+
+        Log.d("SMS_RETRY", "RETRY #" + retry);
+
+        SmsManager smsManager = SmsManager.getDefault();
+
+        Intent sentIntent = new Intent("SMS_SENT_ACTION");
+        sentIntent.putExtra("text", text);
+        sentIntent.putExtra("retry", retry);
+
+        PendingIntent sentPI = PendingIntent.getBroadcast(
+                this,
+                (int) System.currentTimeMillis(),
+                sentIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        smsManager.sendTextMessage(
+                phoneNumber,
+                null,
+                text,
+                sentPI,
+                null
+        );
     }
 
     private String getNetworkType() {
@@ -401,7 +530,7 @@ public class TxForegroundService extends Service {
     private int maxSmsPerSession = 20;
 
     // compressione percorso
-    private float trackSimplifyDistance = 20f;
+    private float trackSimplifyDistance = 2.0f;
 
     // contatori debug
     private int gpsPointsCollected = 0;
@@ -410,8 +539,8 @@ public class TxForegroundService extends Service {
     private long adaptiveGpsInterval = 3000;
 
     // ===== MULTI GPS ADVANCED SETTINGS =====
-    private float trackSimplifyTolerance = 0.00005f;
-    private float trackAngleThreshold = 10f;
+    private float trackSimplifyTolerance = 0.00002f;
+    private float trackAngleThreshold = 0.8f;
     private int maxPointsPerSms = 5;
     private long multiGpsSendIntervalMs = 15000;
     private int keepPoints = 3;
@@ -706,6 +835,7 @@ public class TxForegroundService extends Service {
                 loc.getLongitude();
 
         String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
 
         Log.d("SMS_PROTO", sms);
 
@@ -1030,8 +1160,9 @@ public class TxForegroundService extends Service {
 
         isProcessing = false;
     }
-
-
+    private synchronized int nextSeq() {
+        return currentSeq++;
+    }
 
 
 
@@ -1075,12 +1206,17 @@ public class TxForegroundService extends Service {
 
         if (ACTION_START.equals(action)) {
 
-            finalSmsSent = false;
             currentSessionId = generateSessionId();
             currentSeq = 0;
 
+            // 🔥 RESET CRITICO (QUI!)
+            finalFlushStarted.set(false);
+            finalSmsSent = false;
+            isFinalFlush = false;
+
             String mode = intent.getStringExtra("MODE");
             if (mode == null) mode = "STANDARD";
+
             if ("MULTI_GPS_SMS".equals(mode)) {
                 startMultiGpsMode(intent);
                 return START_STICKY;
@@ -1091,7 +1227,6 @@ public class TxForegroundService extends Service {
                 phoneNumber = phoneNumber.replaceAll("\\s+", "");
             }
 
-
             Log.d("TX_SERVICE",
                     "START mode=" + mode +
                             " phone=" + phoneNumber);
@@ -1099,12 +1234,11 @@ public class TxForegroundService extends Service {
             saveTxState("TRACKING");
             SmsDebugManager.clear();
 
-            // parametri comuni
             maxSms = intent.getIntExtra("maxSms", 10);
             intervalMinutes = intent.getIntExtra("interval", 1);
 
             //--------------------------------
-            // MULTI GPS MODE
+            // MULTI GPS MODE (secondo ramo)
             //--------------------------------
             if ("MULTI_GPS_SMS".equals(mode)) {
 
@@ -1119,6 +1253,7 @@ public class TxForegroundService extends Service {
 
                 return START_STICKY;
             }
+
 
             //--------------------------------
             // CONTINUOUS MODE
@@ -1177,40 +1312,16 @@ public class TxForegroundService extends Service {
             // ================================
             if (multiGpsMode) {
 
-                // 🔥 BLOCCO GLOBALE ANTI-DOPPIO INVIO
-                if (finalSmsSent) {
-                    Log.d("TRACK", "STOP IGNORED → final SMS already sent");
-                } else {
-
-                    Log.d("TRACK", "STOP → FINAL FLUSH START");
-
-                    isFinalFlush = true;
-
-                    if (gpsTrackBuffer.count() > 0) {
-
-                        // 🔥 usa il flusso standard (genera F internamente)
-                        processTrackBuffer();
-
-                    } else {
-
-                        // 🔥 fallback solo se buffer vuoto
-                        currentSeq++;
-
-                        String payload = "TX|" +
-                                currentSessionId + "|" +
-                                currentSeq + "|F|END";
-
-                        String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
-
-                        Log.d("SMS_PROTO", sms);
-
-                        sendTrackSms(sms);
-
-                        // 🔥 BLOCCA QUALSIASI INVIO SUCCESSIVO
-                        finalSmsSent = true;
-                    }
+                if (!finalFlushStarted.compareAndSet(false, true)) {
+                    Log.w("TRACK", "STOP IGNORATO → final flush già avviato");
+                    return START_NOT_STICKY;
                 }
 
+                Log.d("TRACK", "STOP → FINAL FLUSH START");
+
+                isFinalFlush = true;
+
+                processTrackBuffer(); // 🔥 unico punto generazione F
             } else {
 
                 // ================================
@@ -1463,6 +1574,8 @@ public class TxForegroundService extends Service {
                     sendSignalUpdate(lastSignalDbm);
                 }
 
+                if (!isRunning) return;
+
                 signalHandler.postDelayed(this, monitorIntervalMs);
 
                 if (isRunning && noSignalAlertEnabled) {
@@ -1554,8 +1667,20 @@ public class TxForegroundService extends Service {
         Log.d("TX_STATE", "Saved state=" + state);
     }
 
+
     @Override
     public void onCreate() {
+
+        ContextCompat.registerReceiver(
+                this,
+                smsSentReceiver,
+                new IntentFilter("SMS_SENT_ACTION"),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+        );
+        txThread = new HandlerThread("TX_SMS_THREAD");
+        txThread.start();
+
+        txHandler = new Handler(txThread.getLooper());
         SharedPreferences prefs =
                 getSharedPreferences("SmsGpsTrackerPrefs", MODE_PRIVATE);
         debugTrackEnabled =
@@ -1574,6 +1699,7 @@ public class TxForegroundService extends Service {
 
     @Override
     public void onDestroy() {
+        unregisterReceiver(smsSentReceiver);
         super.onDestroy();
 
         Log.d("TX_SERVICE", "Service destroyed");
@@ -1674,6 +1800,9 @@ public class TxForegroundService extends Service {
     private void startTracking() {
 
         sessionStartTime = System.currentTimeMillis();
+        if (debugTrackEnabled) {
+            DebugTrackStore.reset();
+        }
         totalDistanceMeters = 0;
         accuracySum = 0;
         accuracyCount = 0;
@@ -1877,16 +2006,17 @@ public class TxForegroundService extends Service {
                 break;
 
             case NO_SIGNAL:
+                Log.w("SMS", "NO SIGNAL → ACCODO");
                 queueSms(text);
                 break;
 
             case RECOVERY:
+                Log.d("SMS", "RECOVERY → FLUSH + SEND");
                 flushQueue();
                 sendNow(text);
                 break;
         }
     }
-
 
 
 
@@ -2220,6 +2350,80 @@ public class TxForegroundService extends Service {
         }
     }
 
+    private void sendSmsPartsSequentially(List<String> parts, boolean isFinalFlush) {
+
+        final String sessionSnapshot = currentSessionId;
+        final int totalParts = parts.size();
+
+        for (int i = 0; i < totalParts; i++) {
+
+            final int index = i;
+
+            long delay = i * 300L; // 🔥 sequenza reale
+
+            txHandler.postDelayed(() -> {
+
+                // 🔥 BLOCCO 1 — sessione cambiata
+                if (!sessionSnapshot.equals(currentSessionId)) {
+                    Log.w("SEQ", "SMS DROPPATO → session changed");
+                    return;
+                }
+
+                // 🔥 BLOCCO 2 — F già inviato
+                if (finalSmsSent) {
+                    Log.w("SEQ", "SMS DROPPATO → final già inviato");
+                    return;
+                }
+
+                int seq = nextSeq();
+
+                boolean isFinal = isFinalFlush && index == totalParts - 1;
+
+                // 🔥 BLOCCO 3 — evita D durante flush finale
+                if (isFinalFlush && !isFinal) {
+                    Log.w("SEQ", "SMS DROPPATO → flush finale in corso");
+                    return;
+                }
+
+                String type = isFinal ? "F" : "D";
+
+                if (isFinal) {
+
+                    if (finalSmsSent) {
+                        Log.w("TRACK", "F DUPLICATO BLOCCATO");
+                        return;
+                    }
+
+                    finalSmsSent = true;
+
+                    Log.d("TRACK", "FINAL SMS SENT → LOCK ACTIVATED");
+                }
+
+                Log.d("SEQ", "SEND seq=" + seq + " type=" + type);
+
+                String header = "TX|" +
+                        currentSessionId + "|" +
+                        seq + "|" +
+                        type + "|";
+
+                // 🔥 payload originale (solo dati)
+                String payloadRaw = parts.get(index);
+
+                // 🔥 encode Base64
+                String payloadEncoded = encodeBase64(payloadRaw);
+
+                // 🔥 costruzione messaggio con payload ENCODATO
+                String payload = header + payloadEncoded;
+
+                // 🔥 CRC sul payload codificato
+                String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+                sendTrackSms(sms);
+
+            }, delay);
+        }
+    }
+
 
 
     private void applyAdaptiveConfig(AdaptiveConfig c) {
@@ -2236,190 +2440,377 @@ public class TxForegroundService extends Service {
 
     private void processTrackBuffer() {
 
-        Log.d("TRACK", "processTrackBuffer CALLED | final=" + finalSmsSent + " flush=" + isFinalFlush);
 
-        // 🔥 BLOCCO TOTALE DOPO SMS F
-        if (finalSmsSent) {
-            Log.d("TRACK", "BLOCKED: final SMS already sent");
-            return;
-        }
+                Log.d("TRACK", "processTrackBuffer CALLED | final=" + finalSmsSent + " flush=" + isFinalFlush);
 
-        List<GpsPoint> rawPoints;
+                // 🔥 BLOCCO TOTALE DOPO F (sempre)
+                if (finalSmsSent) {
+                    Log.w("TRACK", "PROCESS BLOCCATO → F già inviato");
+                    return;
+                }
 
-        synchronized (bufferLock) {
-            List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+                // ================================
+                // 🔒 LOCK PROCESSING (ATOMICO)
+                // ================================
+                synchronized (processingLock) {
+                    if (!isRunning || !multiGpsMode || isProcessing) {
+                        return;
+                    }
+                    isProcessing = true;
+                }
 
-            if (current == null || current.isEmpty()) {
+                try {
+
+                    List<GpsPoint> rawPoints;
+
+                    // ================================
+                    // 📦 BUFFER READ (THREAD SAFE)
+                    // ================================
+                    synchronized (bufferLock) {
+
+                        List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+                        if (current == null || current.isEmpty()) {
+
+                            // 🔥 CASO CRITICO → BUFFER VUOTO + FLUSH
+                            if (current == null || current.isEmpty()) {
+
+                                if (isFinalFlush && !finalSmsSent) {
+
+                                    List<String> parts = new ArrayList<>();
+                                    parts.add("END");
+
+                                    sendSmsPartsSequentially(parts, true);
+
+                                    return;
+                                }
+
+                                return;
+                            }
+
+                            return;
+                        }
+
+                        // 🔥 NO INVIO PARZIALE SE NON FLUSH
+                        if (!isFinalFlush && current.size() < 10) {
+                            return;
+                        }
+
+                        rawPoints = new ArrayList<>(current);
+                    }
+
+                    long now = System.currentTimeMillis();
+
+                    // ================================
+                    // 📍 CONVERSIONE
+                    // ================================
+                    List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
+
+                    // ================================
+                    // 🔴 FIX 3 — LIMITAZIONE PUNTI (CRITICO CICLI LUNGHI)
+                    // ================================
+                    if (latLngPoints.size() > 300) {
+
+                        Log.w("ADAPT", "TOO MANY POINTS → pre-trim: " + latLngPoints.size());
+
+                        latLngPoints = latLngPoints.subList(
+                                latLngPoints.size() - 300,
+                                latLngPoints.size()
+                        );
+                    }
+                    // ================================
+                    // 🎯 PARAMETRI SMS (UNA SOLA VOLTA)
+                    // ================================
+                    int maxSmsLen = 140;
+
+                    String testHeader = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|";
+                    int headerLen = testHeader.length();
+
+                    int crcLen = 3;
+                    int safetyMargin = 10;
+
+                    // spazio reale payload
+                    int targetPayloadLen = maxSmsLen - headerLen - crcLen - safetyMargin;
+
+
+
+                    Log.d("ADAPT", "Target payload len=" + targetPayloadLen);
+
+                    // ================================
+                    // 🧠 COMPRESSIONE ADATTIVA (SMS SAFE)
+                    // ================================
+                    CompressionResult bestResult = null;
+                    int bestSmsLen = Integer.MAX_VALUE;
+
+                    float tolerance = trackSimplifyTolerance;
+
+                    String payload;
+                    int smsLen;
+
+                    for (int i = 0; i < 10; i++) {
+
+                        CompressionResult temp = AdaptiveSmsCompressor.compressToSms(
+                                latLngPoints,
+                                tolerance,
+                                trackSimplifyDistance,
+                                trackAngleThreshold,
+                                200
+                        );
+
+                        payload = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|" + temp.encoded;
+                        smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+
+                        Log.d("ADAPT", "Iter " + i + " smsLen=" + smsLen + " tol=" + tolerance);
+
+                        // 🔥 best candidate
+                        int targetSmsLen = 120;
+
+                        if (bestResult == null ||
+                                Math.abs(smsLen - targetSmsLen) < Math.abs(bestSmsLen - targetSmsLen)) {
+
+                            bestResult = temp;
+                            bestSmsLen = smsLen;
+                        }
+
+                        // 🎯 target OK
+                        if (smsLen >= 110 && smsLen <= 140) {
+                            break;
+                        }
+
+                        // 🧠 auto adapt
+                        if (smsLen > 140) {
+                            tolerance *= 1.6f;   // 🔥 più aggressivo
+                        } else if (smsLen < 100) {
+                            tolerance *= 0.6f;
+                        } else {
+                            tolerance *= 0.8f;
+                        }
+                    }
+
+                    // ✅ risultato iniziale
+                    CompressionResult res = bestResult;
+
+                    // ================================
+                    // 🚨 HARD LIMIT SMS (OBBLIGATORIO)
+                    // ================================
+
+                    payload = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|" + res.encoded;
+                    smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+
+                    // 🔥 sicurezza assoluta
+                    int safety = 0;
+
+                    while (smsLen > 140 && safety < 10) {
+
+                        Log.w("ADAPT", "FORCE COMPRESSION → smsLen=" + smsLen);
+
+                        tolerance *= 1.25f;
+
+                        res = AdaptiveSmsCompressor.compressToSms(
+                                latLngPoints,
+                                tolerance,
+                                trackSimplifyDistance,
+                                trackAngleThreshold,
+                                200
+                        );
+
+                        // 🔴 RICALCOLO SUBITO
+                        payload = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|" + res.encoded;
+                        smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+
+                        // 🚨 HARD FAILSAFE (OBBLIGATORIO)
+                        if (smsLen > 140) {
+
+                            Log.e("ADAPT", "HARD TRIM ACTIVATED → smsLen=" + smsLen);
+
+                            int maxPayloadLen = 140
+                                    - ("TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|").length()
+                                    - 3 // CRC
+                                    - 2; // margine sicurezza
+
+                            if (res.encoded.length() > maxPayloadLen) {
+                                res.encoded = res.encoded.substring(0, maxPayloadLen);
+                            }
+
+                            // ricalcolo finale
+                            payload = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|" + res.encoded;
+                            smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+
+                            Log.e("ADAPT", "AFTER TRIM → smsLen=" + smsLen);
+                        }
+
+
+
+                        payload = "TX|" + currentSessionId + "|" + (currentSeq + 1) + "|D|" + res.encoded;
+                        smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+
+                        safety++;
+                    }
+
+                    // ================================
+                    // 📊 DEBUG STORE
+                    // ================================
+
+                    if (debugTrackEnabled) {
+                        DebugTrackStore.smsHistory.add(smsLen);
+                    }
+
+                    Log.d("ADAPT", "FINAL smsLen BEST");
+
+                    if (debugTrackEnabled && res != null) {
+
+                        // =========================
+                        // 🔴 RAW (ACCUMULATO CORRETTO)
+                        // =========================
+                        DebugTrackStore.raw.addAll(latLngPoints);
+                        DebugTrackStore.rawCount = DebugTrackStore.raw.size();
+
+                        // =========================
+                        // 🟡 FILTERED
+                        // =========================
+                        List<LatLng> filteredPoints =
+                                BasicFilter.apply(latLngPoints,
+                                        (float) trackSimplifyDistance,
+                                        (float) trackAngleThreshold);
+
+                        DebugTrackStore.filtered.addAll(filteredPoints);
+                        DebugTrackStore.filteredCount = DebugTrackStore.filtered.size();
+
+                        // =========================
+                        // 🟢 SIMPLIFIED
+                        // =========================
+                        List<LatLng> simplifiedPoints =
+                                TrackSimplifier.simplify(filteredPoints, res.usedEpsilon);
+
+                        DebugTrackStore.simplified.addAll(simplifiedPoints);
+                        DebugTrackStore.simplifiedCount = DebugTrackStore.simplified.size();
+
+                        // =========================
+                        // 📊 DEBUG INFO
+                        // =========================
+                        DebugTrackStore.lastSms = res.encoded;
+                        DebugTrackStore.smsLength = res.encoded.length();
+
+                        // =========================
+                        // 📈 HISTORY
+                        // =========================
+                        DebugTrackStore.rawHistory.add(latLngPoints.size());
+                        DebugTrackStore.filteredHistory.add(filteredPoints.size());
+                        DebugTrackStore.simplifiedHistory.add(simplifiedPoints.size());
+                        DebugTrackStore.timeHistory.add(now);
+                    }
+
+                    // 🔥 HARD LIMIT SMS LENGTH (CRITICO)
+                    if (smsLen > 140) {
+
+                        int maxPayloadLen = 140
+                                - headerLen
+                                - crcLen
+                                - 2;
+
+                        if (res.encoded.length() > maxPayloadLen) {
+                            res.encoded = res.encoded.substring(0, maxPayloadLen);
+                        }
+                    }
+
+            Log.d("ADAPT", "FINAL len=" + res.encoded.length());
+
+            // ================================
+            // 🚫 LIMITE SESSIONE
+            // ================================
+            if (smsSent >= maxSmsPerSession) {
+                stopTrackingInternal();
                 return;
             }
 
-            // 🔥 blocco normale (solo se NON è flush finale)
-            if (!isFinalFlush && current.size() < 10) {
-                return;
-            }
+            // ================================
+            // ✂️ SPLIT SMS (RIUSA VARIABILI)
+            // ================================
+            String encoded = res.encoded;
 
-            rawPoints = new ArrayList<>(current);
-        }
+            // 🔥 chunk size calcolato UNA VOLTA
+            int chunkSize = maxSmsLen - headerLen - crcLen - safetyMargin;
 
-        if (!isRunning || !multiGpsMode || isProcessing) {
-            return;
-        }
+            List<String> parts = splitEncoded(encoded, chunkSize);
+            int totalParts = parts.size();
 
-        isProcessing = true;
-        long now = System.currentTimeMillis();
+            // 🔥 RICALCOLO SICURO
+            chunkSize = computeChunkSizeSafe(totalParts, headerLen);
+            parts = splitEncoded(encoded, chunkSize);
 
-        // ?? CONVERSIONE UNA VOLTA SOLA
-        List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
+            // 🔥 RICALCOLO SICURO
+            chunkSize = computeChunkSizeSafe(totalParts, headerLen);
+            parts = splitEncoded(encoded, chunkSize);
 
-        // ================================
-        // ?? STEP 3.5 — TARGET DINAMICO
-        // ================================
-        int pointsSize = latLngPoints.size(); // ? meglio di rawPoints
-        int dynamicTarget;
+            // ================================
+            // 🚀 INVIO SEQUENZIALE
+            // ================================
+            sendSmsPartsSequentially(parts, isFinalFlush);
 
-        if (pointsSize > 400) {
-            dynamicTarget = 150;
-        } else if (pointsSize > 200) {
-            dynamicTarget = 140;
-        } else if (pointsSize > 100) {
-            dynamicTarget = 120;
-        } else if (pointsSize > 50) {
-            dynamicTarget = 100;
-        } else {
-            dynamicTarget = 80;
-        }
+            // ================================
+            // 🔥 GESTIONE FLUSH
+            // ================================
+            boolean wasFinalFlush = isFinalFlush;
+            isFinalFlush = false;
 
-        Log.d("ADAPT", "Dynamic target=" + dynamicTarget + " | pts=" + pointsSize);
+            lastTrackSmsTime = now;
 
-        // ================================
-        // ?? ADAPTIVE COMPRESSION
-        // ================================
-        CompressionResult res = AdaptiveSmsCompressor.compressToSms(
-                latLngPoints,
-                trackSimplifyTolerance,
-                trackSimplifyDistance,
-                trackAngleThreshold,
-                dynamicTarget
-        );
+            // ================================
+            // ♻️ ROLLING BUFFER (solo NON finale)
+            // ================================
+            if (!wasFinalFlush) {
 
-        // ?? LIMIT SMS
-        if (smsSent >= maxSmsPerSession) {
-            stopTrackingInternal();
-            isProcessing = false;
-            return;
-        }
+                synchronized (bufferLock) {
 
-        // ================================
-        // ?? MULTI-SMS + FLAG FINALE
-        // ================================
-        String encoded = res.encoded;
-        int chunkSize = 130; // chunk iniziale safe, ridimensionato dinamicamente
-        List<String> parts = splitEncoded(encoded, chunkSize);
-        int totalParts = parts.size();
-        // 🔥 PROTOCOLLO SMS
+                    List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
 
-        // ricalcolo chunk size preciso
-        chunkSize = computeChunkSize(totalParts);
-        parts = splitEncoded(encoded, chunkSize);
-        totalParts = parts.size();
+                    int keep = Math.min(keepPoints, current.size());
 
-        for (int i = 0; i < totalParts; i++) {
+                    List<GpsPoint> tail = new ArrayList<>();
 
-            currentSeq++;
+                    for (int i = current.size() - keep; i < current.size(); i++) {
+                        tail.add(current.get(i));
+                    }
 
-            String type = (isFinalFlush && i == totalParts - 1) ? "F" : "D";
+                    gpsTrackBuffer.clear();
 
-            if (type.equals("F")) {
-                finalSmsSent = true;
-                Log.d("TRACK", "FINAL SMS SENT → LOCK ACTIVATED");
-            }
-
-            String header = "TX|" +
-                    currentSessionId + "|" +
-                    currentSeq + "|"+   // 🔥 niente più /tot
-                    type + "|";
-
-            String payload = header + parts.get(i);
-
-            String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
-
-            Log.d("SMS_PROTO", sms);
-
-            sendTrackSms(sms);
-
-            try {
-                Thread.sleep(300);
-            } catch (InterruptedException ignored) {}
-        }
-
-        // ================================
-        // FINE PROCESSING
-        // ================================
-
-        // 🔥 RESET FLUSH (ma DOPO aver usato il flag)
-        boolean wasFinalFlush = isFinalFlush;
-        isFinalFlush = false;
-
-        lastTrackSmsTime = now;
-
-        // ================================
-        // ROLLING BUFFER (solo se NON finale)
-        // ================================
-        if (!wasFinalFlush) {
-            synchronized (bufferLock) {
-
-                List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-                int keep = Math.min(keepPoints, current.size());
-
-                List<GpsPoint> tail = new ArrayList<>();
-                for (int i = current.size() - keep; i < current.size(); i++) {
-                    tail.add(current.get(i));
-                }
-
-                gpsTrackBuffer.clear();
-                for (GpsPoint gp : tail) {
-                    gpsTrackBuffer.addPoint(gp);
+                    for (GpsPoint gp : tail) {
+                        gpsTrackBuffer.addPoint(gp);
+                    }
                 }
             }
+
+            // ================================
+            // 🛑 FINALE
+            // ================================
+            if (wasFinalFlush) {
+                Log.d("TRACK", "FINAL FLUSH COMPLETED");
+            }
+
+        } finally {
+
+            synchronized (processingLock) {
+                isProcessing = false;
+            }
         }
+    }
+    private int computeChunkSizeSafe(int totalParts, int headerLen) {
 
-        // ================================
-        // DEBUG
-        // ================================
-        List<LatLng> filtered =
-                BasicFilter.apply(latLngPoints,
-                        (float) trackSimplifyDistance,
-                        (float) trackAngleThreshold);
+        int maxSmsLen = 140;
+        int crcLen = 3;
+        int safetyMargin = 10;
 
-        List<LatLng> simplified =
-                TrackSimplifier.simplify(filtered, trackSimplifyTolerance);
+        int chunk = maxSmsLen - headerLen - crcLen - safetyMargin;
 
-        if (debugTrackEnabled && DebugTrackActivity.isOpen) {
+        // 🔥 protezione extra (mai troppo grande)
+        if (chunk > 120) chunk = 120;
 
-            DebugTrackStore.raw = latLngPoints;
-            DebugTrackStore.filtered = filtered;
-            DebugTrackStore.simplified = simplified;
+        // 🔥 protezione minima
+        if (chunk < 50) chunk = 50;
 
-            DebugTrackStore.rawCount = latLngPoints.size();
-            DebugTrackStore.filteredCount = filtered.size();
-            DebugTrackStore.simplifiedCount = simplified.size();
+        Log.d("SMS_DEBUG", "Chunk finale safe=" + chunk + " parts=" + totalParts);
 
-            DebugTrackStore.smsLength = encoded.length();
-            DebugTrackStore.lastSms = encoded;
-        }
-
-        // ================================
-        // 🔥 SBLOCCO SISTEMA (FONDAMENTALE)
-        // ================================
-        isProcessing = false;
-
-        // ================================
-        // STOP DEFINITIVO SOLO SE FINALE
-        // ================================
-        if (wasFinalFlush) {
-            Log.d("TRACK", "FINAL FLUSH COMPLETED");
-            return;
-        }
+        return chunk;
     }
 
     private List<LatLng> convertGpsPointsToLatLng(List<GpsPoint> list) {

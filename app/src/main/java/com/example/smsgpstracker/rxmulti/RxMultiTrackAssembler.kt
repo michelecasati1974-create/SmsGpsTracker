@@ -11,7 +11,45 @@ class RxMultiTrackAssembler {
 
     private val sessions = mutableMapOf<String, SessionBuffer>()
 
+    fun isSessionComplete(sessionId: String): Boolean {
+
+        val session = sessions[sessionId] ?: return false
+
+        if (!session.isFinalReceived) return false
+
+        val sorted = session.packets.toSortedMap()
+
+        var expected = sorted.keys.firstOrNull() ?: return false
+
+        for (key in sorted.keys) {
+            if (key != expected) return false
+            expected++
+        }
+
+        return true
+    }
+
+    fun hasMissingSequences(sessionId: String): Boolean {
+
+        val session = sessions[sessionId] ?: return false
+
+        val sorted = session.packets.toSortedMap()
+
+        var expected = sorted.keys.firstOrNull() ?: return false
+
+        for (key in sorted.keys) {
+            if (key != expected) return true
+            expected++
+        }
+
+        return false
+    }
+
+
+
     fun process(packet: RxMultiSmsPacket): List<Pair<Double, Double>> {
+
+
 
         val session = sessions.getOrPut(packet.sessionId) {
             SessionBuffer()
@@ -35,11 +73,15 @@ class RxMultiTrackAssembler {
         if (packet.type == "F") {
 
             session.isFinalReceived = true
+        }
+
+        // 🔥 PROVA SEMPRE ricostruzione se F è arrivato
+        if (session.isFinalReceived) {
 
             val full = tryReconstruct(packet.sessionId)
 
             if (full != null) {
-                return full   // 🔥 traccia completa
+                return full
             }
         }
 
@@ -90,15 +132,28 @@ class RxMultiTrackAssembler {
 
         val session = sessions[sessionId] ?: return emptyList()
 
-        val ordered = session.packets.toSortedMap()
+        val sorted = session.packets.toSortedMap()
 
         val result = mutableListOf<Pair<Double, Double>>()
 
-        ordered.values.forEach { packet ->
+        var expected = sorted.keys.firstOrNull() ?: return emptyList()
+
+        for ((seq, packet) in sorted) {
+
+            if (seq != expected) {
+                // 🔥 STOP su buco
+                break
+            }
+
             val decoded = PolylineCodec.decode(packet.payload)
             result.addAll(decoded)
+
+            expected++
         }
 
         return result
+    }
+    fun isNewSession(packet: RxMultiSmsPacket): Boolean {
+        return !sessions.containsKey(packet.sessionId)
     }
 }

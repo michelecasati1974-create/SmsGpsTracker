@@ -35,6 +35,7 @@ import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
 import com.example.smsgpstracker.rxmulti.RxMultiExtraRepository
 
 
+
 class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var txtStatus: TextView
@@ -64,8 +65,124 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     private val multiAssembler = RxMultiTrackAssembler()
     private val emergencyPoints = mutableListOf<LatLng>()
     private var emergencyBlink = false
-    private val manualMarkers = mutableListOf<Marker>()
+    private val manualMarkerMap = mutableMapOf<String, Marker>()
     private var firstCameraMove = true
+    private var snapshotDone = false
+
+
+    private fun handleTrackSms(sms: String) {
+
+
+        try {
+            val packet = multiParser.parse(sms)
+
+            if (packet == null) {
+                Log.e("RX_MULTI_DEBUG", "PARSE FALLITO per SMS: $sms")
+                return
+            }
+
+            // 🔥 RESET SNAPSHOT SU NUOVA SESSIONE / PRIMO PACCHETTO
+            if (multiAssembler.isNewSession(packet)) {
+                snapshotDone = false
+                Log.d("RX_MULTI_DEBUG", "NUOVA SESSIONE REALE")
+            }
+
+            Log.d("RX_MULTI_DEBUG", "PROCESSATO seq=${packet.seq} type=${packet.type}")
+
+            // 🔥 UPDATE SESSIONE
+            val fullTrack = multiAssembler.process(packet)
+
+            if (packet.type == "F" && fullTrack.isNotEmpty()) {
+
+                trackPoints.clear()
+                trackPoints.addAll(fullTrack.map { LatLng(it.first, it.second) })
+
+                RxMultiTrackRepository.points.clear()
+                RxMultiTrackRepository.points.addAll(fullTrack)
+
+                snapshotDone = true
+
+                Log.d("RX_MULTI", "TRACK COMPLETO DA ASSEMBLER")
+
+                Handler(mainLooper).postDelayed({
+                    generateFinalSnapshot()
+                }, 1500)
+
+                txtStatus.text = "Tracking completato"
+
+                return
+            }
+
+            // 🔥 TRACK PARZIALE
+            val partialRaw = multiAssembler.getPartialTrack(packet.sessionId)
+            Log.d("RX_MULTI_DEBUG", "TRACK SIZE DOPO UPDATE: ${partialRaw.size}")
+
+            if (partialRaw.isEmpty()) return
+
+            // 🔥 STEP 2.3 → DEDUPLICAZIONE
+            val deduped = dedupeLatLng(
+                partialRaw.map { LatLng(it.first, it.second) }
+            )
+
+            trackPoints.clear()
+            trackPoints.addAll(deduped)
+
+            // 🔥 SYNC REPOSITORY
+            RxMultiTrackRepository.points.clear()
+            RxMultiTrackRepository.points.addAll(partialRaw)
+
+            val typeClean = packet.type.trim()
+
+            Log.d("RX_MULTI_DEBUG", "CHECK TYPE: [$typeClean]")
+
+            // =========================
+            // 🎯 UI UPDATE
+            // =========================
+            if (mapReady) drawAllPoints()
+
+            txtStatus.text =
+                if (typeClean == "F") "Tracking completato"
+                else "RX ATTIVO"
+
+            // =========================
+            // 🔥 CHIUSURA NORMALE (F)
+            // =========================
+            if (typeClean == "F" && !snapshotDone) {
+
+                val isComplete = multiAssembler.isSessionComplete(packet.sessionId)
+
+                if (isComplete) {
+
+                    snapshotDone = true
+
+                    Log.d("RX_MULTI", "F → SNAPSHOT COMPLETO")
+
+                    Handler(mainLooper).postDelayed({
+                        generateFinalSnapshot()
+                    }, 1500)
+
+                } else {
+
+                    Log.w("RX_MULTI", "F ricevuto ma sessione incompleta")
+
+                    // opzionale: timeout recovery
+                }
+            }
+
+
+
+            // =========================
+            // 🔍 DEBUG SESSIONE
+            // =========================
+            Log.d(
+                "RX_SESSION",
+                "Session ${packet.sessionId} seq=${packet.seq} type=$typeClean size=${trackPoints.size}"
+            )
+
+        } catch (e: Exception) {
+            Log.e("RX_MULTI", "Errore handleTrackSms", e)
+        }
+    }
 
 
 
@@ -77,15 +194,17 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         override fun onReceive(context: Context?, intent: Intent?) {
 
-            val type = intent?.getStringExtra("SMS_BODY") ?: return
+            val typeRaw = intent?.getStringExtra("SMS_BODY") ?: return
             val raw = intent.getStringExtra("RAW_SMS")
 
-            Log.d("RX_DEBUG", "TYPE: [$type] RAW: [$raw]")
+            val type = typeRaw.trim().uppercase()
+
+            Log.d("RX_DEBUG", "TYPE RAW: [$typeRaw] → NORMALIZED: [$type] RAW: [$raw]")
 
             // =====================================================
-            // 🚨 EMERGENCY (USA RAW!)
+            // 🚨 EMERGENCY
             // =====================================================
-            if (type == "EMERGENCY" && raw != null) {
+            if (raw != null && raw.contains("CTRL|EMERGENCY")) {
 
                 Log.d("DEBUG_EMERGENCY", "RAW: $raw")
 
@@ -112,9 +231,12 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                         if (mapReady) {
                             updateEmergencyMarkers()
 
-                            googleMap.animateCamera(
-                                CameraUpdateFactory.newLatLngZoom(point, 17f)
-                            )
+                            // ❌ NON zoommare sempre!
+                            if (trackPoints.isEmpty()) {
+                                googleMap.animateCamera(
+                                    CameraUpdateFactory.newLatLngZoom(point, 17f)
+                                )
+                            }
                         }
                     }
 
@@ -127,9 +249,9 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
 
             // =====================================================
-            // ⭐ POSIZIONE MANUALE (USA RAW!)
+            // ⭐ GPS MANUAL
             // =====================================================
-            if (type == "GPS_MANUAL" && raw != null) {
+            if (type.startsWith("GPS_MANUAL") && raw != null) {
 
                 Log.d("DEBUG_MANUAL", "RAW: $raw")
 
@@ -154,7 +276,10 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                         Log.d("DEBUG_MANUAL", "SIZE: ${manualPoints.size}")
 
                         // 🟡 MARKER REALTIME
-                        if (mapReady) drawAllPoints()
+                        if (mapReady) {
+                            // NON ridisegnare tutto → solo marker
+                            drawManualMarkersOnly()
+                        }
 
                     } else {
                         Log.e("DEBUG_MANUAL", "REGEX NON MATCHA")
@@ -168,54 +293,10 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             }
 
             // =====================================================
-            // 📡 MULTI GPS PROTOCOL (TX|...)
+            // 📡 MULTI GPS PROTOCOL
             // =====================================================
-            if (type.startsWith("TX|")) {
-
-                Log.d("RX_MULTI", "SMS MULTI: $type")
-
-                try {
-
-                    val packet = multiParser.parse(type) ?: return
-
-                    // 🔥 AGGIORNA SESSIONE
-                    multiAssembler.process(packet)
-
-                    // 🔥 PRENDI SEMPRE TRACK COMPLETA (parziale o finale)
-                    val partial = multiAssembler.getPartialTrack(packet.sessionId)
-
-                    if (partial.isNotEmpty()) {
-
-                        trackPoints.clear()
-
-                        partial.forEach {
-                            trackPoints.add(LatLng(it.first, it.second))
-                        }
-
-                        // 🔥🔥 AGGIUNGI QUESTO BLOCCO
-                        RxMultiTrackRepository.points.clear()
-                        RxMultiTrackRepository.points.addAll(partial)
-                        // 🔥🔥 FINE FIX
-
-                        if (mapReady) drawAllPoints()
-
-                        txtStatus.text =
-                            if (packet.type == "F") "Tracking completato"
-                            else "RX ATTIVO"
-                    }
-
-                    // 🔥 SNAPSHOT SOLO SE F
-                    if (packet.type == "F" && trackPoints.isNotEmpty()) {
-
-                        Handler(mainLooper).postDelayed({
-                            generateFinalSnapshot()
-                        }, 2000)
-                    }
-
-                } catch (e: Exception) {
-                    Log.e("RX_MULTI", "Errore MULTI", e)
-                }
-
+            if (typeRaw.startsWith("TX|")) {
+                handleTrackSms(typeRaw)
                 return
             }
 
@@ -224,6 +305,66 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             // =====================================================
             Log.d("RX_DEBUG", "SMS NON GESTITO: [$type]")
         }
+    }
+
+    private fun drawManualMarkersOnly() {
+
+        manualPoints.forEach { point ->
+
+            val key = "${point.latitude}_${point.longitude}"
+
+            if (!manualMarkerMap.containsKey(key)) {
+
+                val marker = googleMap.addMarker(
+                    MarkerOptions()
+                        .position(point)
+                        .title("⭐ Posizione manuale")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
+                )
+
+                if (marker != null) {
+                    manualMarkerMap[key] = marker
+                }
+            }
+        }
+    }
+
+    private fun distance(a: Pair<Double, Double>, b: Pair<Double, Double>): Double {
+        val dLat = a.first - b.first
+        val dLon = a.second - b.second
+        return kotlin.math.sqrt(dLat * dLat + dLon * dLon)
+    }
+
+    private fun deduplicate(points: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
+
+        val result = mutableListOf<Pair<Double, Double>>()
+        var last: Pair<Double, Double>? = null
+
+        for (p in points) {
+            if (last == null || distance(p, last) > 0.00001) {
+                result.add(p)
+                last = p
+            }
+        }
+
+        return result
+    }
+
+    private fun dedupeLatLng(points: List<LatLng>): List<LatLng> {
+        val result = mutableListOf<LatLng>()
+
+        points.forEach { p ->
+            if (result.isEmpty() || !p.isCloseTo(result.last())) {
+                result.add(p)
+            }
+        }
+
+        return result
+    }
+
+    private fun LatLng.isCloseTo(other: LatLng, threshold: Double = 0.00001): Boolean {
+        return kotlin.math.abs(latitude - other.latitude) < threshold &&
+                kotlin.math.abs(longitude - other.longitude) < threshold
     }
 
     private fun startEmergencyBlink() {
@@ -251,22 +392,28 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun updateEmergencyMarkers() {
 
-        // rimuovi vecchi
-        emergencyMarkers.forEach { it.remove() }
-        emergencyMarkers.clear()
+        // se non esistono → creali UNA VOLTA
+        if (emergencyMarkers.size != emergencyPoints.size) {
 
-        if (!emergencyBlink) return
+            emergencyMarkers.forEach { it.remove() }
+            emergencyMarkers.clear()
 
-        emergencyPoints.forEach { point ->
+            emergencyPoints.forEach { point ->
 
-            val marker = googleMap.addMarker(
-                MarkerOptions()
-                    .position(point)
-                    .title("🚨 EMERGENCY")
-                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-            )
+                val marker = googleMap.addMarker(
+                    MarkerOptions()
+                        .position(point)
+                        .title("🚨 EMERGENCY")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+                )
 
-            if (marker != null) emergencyMarkers.add(marker)
+                if (marker != null) emergencyMarkers.add(marker)
+            }
+        }
+
+        // 🔥 blink SOLO visibility
+        emergencyMarkers.forEach {
+            it.isVisible = emergencyBlink
         }
     }
 
@@ -381,8 +528,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         // EMERGENCY
 
         emergencyPoints.clear()
-        updateEmergencyMarkers()
         emergencyPoints.addAll(RxMultiExtraRepository.emergency)
+        updateEmergencyMarkers()
 
         if (selectedMapProvider == "MAPTILER") {
 
@@ -446,19 +593,23 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         // ⭐ MANUAL POINTS (NO DUPLICATI)
         // =========================
         // pulisci vecchi
-        manualMarkers.forEach { it.remove() }
-        manualMarkers.clear()
-
         manualPoints.forEach { point ->
 
-            val marker = googleMap.addMarker(
-                MarkerOptions()
-                    .position(point)
-                    .title("⭐ Posizione manuale")
-                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
-            )
+            val key = "${point.latitude}_${point.longitude}"
 
-            if (marker != null) manualMarkers.add(marker)
+            if (!manualMarkerMap.containsKey(key)) {
+
+                val marker = googleMap.addMarker(
+                    MarkerOptions()
+                        .position(point)
+                        .title("⭐ Posizione manuale")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
+                )
+
+                if (marker != null) {
+                    manualMarkerMap[key] = marker
+                }
+            }
         }
 
 
@@ -569,11 +720,10 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
             takeSnapshot()
 
-        }, 1500)
+        }, 500) // 🔥 basta mezzo secondo ora
     }
 
     private fun generateFinalSnapshot() {
-
 
         if (!mapReady || trackPoints.isEmpty()) return
 
@@ -588,14 +738,43 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 override fun onFinish() {
 
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        takeSnapshotSafely()
-                    }, 2000) // più tempo per MapTiler
+                    Log.d("SNAPSHOT_DEBUG", "Camera animation finished")
 
+                    var snapshotDone = false
+
+                    // 🔥 CALLBACK CORRETTO
+                    googleMap.setOnMapLoadedCallback {
+
+                        if (!snapshotDone) {
+                            snapshotDone = true
+
+                            Log.d("SNAPSHOT_DEBUG", "Map fully loaded → snapshot")
+
+                            takeSnapshotSafely()
+                        }
+                    }
+
+                    // 🔥 FALLBACK SICURO
+                    Handler(Looper.getMainLooper()).postDelayed({
+
+                        if (!snapshotDone) {
+                            snapshotDone = true
+
+                            Log.w("SNAPSHOT_DEBUG", "Fallback snapshot")
+
+                            takeSnapshot()
+                        }
+
+                    }, 4000)
                 }
 
                 override fun onCancel() {
-                    takeSnapshotSafely()
+
+                    Log.d("SNAPSHOT_DEBUG", "Camera cancelled")
+
+                    googleMap.setOnMapLoadedCallback {
+                        takeSnapshotSafely()
+                    }
                 }
             }
         )
@@ -612,12 +791,42 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             if (originalBitmap == null) return@snapshot
             if (trackPoints.isEmpty()) return@snapshot
 
-            val bitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
+            // =========================
+            // 🔥 SCALE FACTOR (QUALITÀ)
+            // =========================
+            val scaleFactor = 2f
+
+            val scaledBitmap = Bitmap.createScaledBitmap(
+                originalBitmap,
+                (originalBitmap.width * scaleFactor).toInt(),
+                (originalBitmap.height * scaleFactor).toInt(),
+                true
+            )
+
+            val bitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(bitmap)
 
+            // ⚠️ scala il canvas (tutto viene disegnato proporzionato)
+            canvas.scale(scaleFactor, scaleFactor)
+
+            // =========================
+            // 🎯 DIMENSIONI DINAMICHE
+            // =========================
+            val startEndRadius = 22f / scaleFactor
+            val normalRadius = 6f / scaleFactor
+            val manualRadius = 20f / scaleFactor
+            val emergencyRadius = 26f / scaleFactor
+
+            val textSmall = 18f / scaleFactor
+            val textNormal = 22f / scaleFactor
+            val textBig = 30f / scaleFactor
+
+            // =========================
+            // 🎨 PAINT
+            // =========================
             val paintText = Paint().apply {
                 color = Color.BLACK
-                textSize = 22f   // molto piccolo ma leggibile
+                textSize = textNormal
                 isAntiAlias = true
             }
 
@@ -628,6 +837,9 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
             val projection = googleMap.projection
 
+            // =========================
+            // 🔴 TRACK POINTS
+            // =========================
             trackPoints.forEachIndexed { index, latLng ->
 
                 val point = projection.toScreenLocation(latLng)
@@ -638,11 +850,11 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     index == 0 -> {
 
                         paintCircle.color = Color.GREEN
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), startEndRadius, paintCircle)
 
-                        paintText.textSize = 30f
+                        paintText.textSize = textBig
                         paintText.color = Color.WHITE
-                        paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+                        paintText.setShadowLayer(4f / scaleFactor, 1f, 1f, Color.BLACK)
 
                         canvas.drawText(
                             "S",
@@ -658,11 +870,11 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     index == trackPoints.lastIndex -> {
 
                         paintCircle.color = Color.RED
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), startEndRadius, paintCircle)
 
-                        paintText.textSize = 30f
+                        paintText.textSize = textBig
                         paintText.color = Color.WHITE
-                        paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+                        paintText.setShadowLayer(4f / scaleFactor, 1f, 1f, Color.BLACK)
 
                         canvas.drawText(
                             "E",
@@ -674,21 +886,21 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                         paintText.clearShadowLayer()
                     }
 
-                    // ⚫ PUNTI NORMALI
+                    // ⚫ NORMALI
                     else -> {
 
                         paintCircle.color = Color.BLACK
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 12f, paintCircle)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), normalRadius, paintCircle)
 
                         // etichetta ogni 5 punti
                         if (index % 5 == 0) {
 
-                            paintText.textSize = 22f
+                            paintText.textSize = textSmall
                             paintText.color = Color.BLACK
 
                             canvas.drawText(
                                 "P$index",
-                                point.x.toFloat() + 10f,
+                                point.x.toFloat() + 8f,
                                 point.y.toFloat(),
                                 paintText
                             )
@@ -696,9 +908,12 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     }
                 }
             }
+
+            // =========================
+            // 🟡 MANUAL POINTS
+            // =========================
             manualPoints.forEach { manual ->
 
-                Log.d("DEBUG_DRAW", "Disegno MANUALE: ${manual.latitude},${manual.longitude}")
                 val isOverEmergency = emergencyPoints.any {
                     kotlin.math.abs(it.latitude - manual.latitude) < 0.0001 &&
                             kotlin.math.abs(it.longitude - manual.longitude) < 0.0001
@@ -709,56 +924,61 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                 val p = projection.toScreenLocation(manual)
 
                 paintCircle.color = Color.YELLOW
-                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), 20f, paintCircle)
+                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), manualRadius, paintCircle)
 
-                paintText.textSize = 34f
+                paintText.textSize = textBig
                 paintText.color = Color.YELLOW
-                paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+                paintText.setShadowLayer(4f / scaleFactor, 1f, 1f, Color.BLACK)
 
                 canvas.drawText(
-                    "🌟",
-                    p.x.toFloat() - 18f,
-                    p.y.toFloat() + 12f,
+                    "★",
+                    p.x.toFloat() - 15f,
+                    p.y.toFloat() + 10f,
                     paintText
                 )
-                paintText.textSize = 18f
-                paintText.color = Color.BLACK
+
                 paintText.clearShadowLayer()
+
+                paintText.textSize = textSmall
+                paintText.color = Color.BLACK
 
                 canvas.drawText(
                     "${"%.6f".format(manual.latitude)}, ${"%.6f".format(manual.longitude)}",
-                    p.x.toFloat() - 80f,
-                    p.y.toFloat() - 25f,
+                    p.x.toFloat() - 70f,
+                    p.y.toFloat() - 20f,
                     paintText
                 )
-
-                paintText.clearShadowLayer()
             }
 
+            // =========================
+            // 🔴 EMERGENCY POINTS
+            // =========================
             emergencyPoints.forEach { em ->
 
-                Log.d("DEBUG_DRAW", "Disegno EMERGENCY: ${em.latitude},${em.longitude}")
                 val p = projection.toScreenLocation(em)
 
                 paintCircle.color = Color.RED
-                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), 26f, paintCircle)
+                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), emergencyRadius, paintCircle)
 
-                paintText.textSize = 18f
+                paintText.textSize = textSmall
                 paintText.color = Color.RED
-                paintText.clearShadowLayer()
 
                 canvas.drawText(
                     "${"%.6f".format(em.latitude)}, ${"%.6f".format(em.longitude)}",
-                    p.x.toFloat() - 80f,
-                    p.y.toFloat() - 30f,
+                    p.x.toFloat() - 70f,
+                    p.y.toFloat() - 25f,
                     paintText
                 )
-
-                paintText.clearShadowLayer()
             }
 
+            // =========================
+            // 🧾 INFO OVERLAY
+            // =========================
             drawInfoOverlay(canvas, bitmap)
 
+            // =========================
+            // 💾 SAVE
+            // =========================
             saveFinalBitmap(bitmap)
         }
     }

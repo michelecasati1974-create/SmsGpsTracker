@@ -122,6 +122,7 @@ public class AdaptiveSmsCompressor {
         res.smsCount = 1;
         res.usedEpsilon = epsilon;
         res.usedDistance = distance;
+        res.simplifiedPoints = simplified;
 
         return res;
     }

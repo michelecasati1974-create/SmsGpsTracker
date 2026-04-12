@@ -1,4 +1,6 @@
 package com.example.smsgpstracker;
+import com.google.android.gms.maps.model.LatLng;
+import java.util.List;
 
 public class CompressionResult {
 
@@ -11,4 +13,6 @@ public class CompressionResult {
     public double usedEpsilon;
 
     public double usedDistance;
+
+    public List<LatLng> simplifiedPoints;
 }

@@ -4,7 +4,6 @@ import android.graphics.Color;
 import android.os.Bundle;
 
 import androidx.appcompat.app.AppCompatActivity;
-
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.OnMapReadyCallback;
@@ -14,6 +13,9 @@ import com.google.android.gms.maps.model.MarkerOptions;
 import com.google.android.gms.maps.model.PolylineOptions;
 import android.os.Handler;
 import android.widget.TextView;
+import android.util.Log;
+
+
 
 
 
@@ -25,17 +27,22 @@ public class DebugTrackActivity extends AppCompatActivity
     private Handler handler = new Handler();
     private boolean firstDraw = true;
     private boolean cameraMoved = false;
+    private DebugGraphView graphView;
+    private boolean mapReady = false;
 
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_debug_track);
 
         isOpen = true;
 
         statsView = findViewById(R.id.stats);
+        graphView = findViewById(R.id.graph);
 
         startStatsUpdater();
 
@@ -46,6 +53,9 @@ public class DebugTrackActivity extends AppCompatActivity
         if (mapFragment != null) {
             mapFragment.getMapAsync(this);
         }
+        if (graphView != null) {
+            graphView.invalidate();
+        }
     }
 
     private void startStatsUpdater() {
@@ -54,15 +64,72 @@ public class DebugTrackActivity extends AppCompatActivity
             @Override
             public void run() {
 
+                refreshMap();
                 updateStats();
 
-                if (DebugTrackStore.rawCount > 0) {
-                    refreshMap();
-                }
+                if (graphView != null) graphView.invalidate();
 
                 handler.postDelayed(this, 1000);
             }
         }, 1000);
+    }
+
+    private void refreshMap() {
+        if (!mapReady) return;
+        redrawAll();
+    }
+
+    @Override
+    public void onMapReady(GoogleMap googleMap) {
+
+        map = googleMap;
+        mapReady = true;
+
+        Log.d("DEBUG_TRACK", "Map READY → redraw");
+
+        redrawAll();
+        updateStats(); // 🔥 AGGIUNTA
+    }
+
+
+
+    private void redrawAll() {
+
+        if (map == null) return;
+
+        map.clear();
+
+        // 🔴 RAW
+        if (DebugTrackStore.raw != null && DebugTrackStore.raw.size() > 1) {
+            map.addPolyline(
+                    new PolylineOptions()
+                            .addAll(DebugTrackStore.raw)
+                            .color(Color.RED)
+                            .width(4)
+            );
+        }
+
+        // 🟡 FILTERED (AGGIUNTA!)
+        if (DebugTrackStore.filtered != null && DebugTrackStore.filtered.size() > 1) {
+            map.addPolyline(
+                    new PolylineOptions()
+                            .addAll(DebugTrackStore.filtered)
+                            .color(Color.YELLOW)
+                            .width(5)
+            );
+        }
+
+        // 🟢 SIMPLIFIED
+        if (DebugTrackStore.simplified != null && DebugTrackStore.simplified.size() > 1) {
+            map.addPolyline(
+                    new PolylineOptions()
+                            .addAll(DebugTrackStore.simplified)
+                            .color(Color.GREEN)
+                            .width(6)
+            );
+        }
+
+        moveCamera();
     }
 
     private void updateStats() {
@@ -74,122 +141,32 @@ public class DebugTrackActivity extends AppCompatActivity
                         "SMS LEN: " + DebugTrackStore.smsLength + "\n" +
                         "SMS: " + DebugTrackStore.lastSms;
 
-        statsView.setText(text);
-    }
-
-    private void refreshMap() {
-
-        if (map == null) return;
-
-        map.clear(); // 🔥 SEMPRE
-
-        loadTrack();
-    }
-
-    @Override
-    public void onMapReady(GoogleMap googleMap) {
-
-        map = googleMap;
-
-        loadTrack();
-    }
-
-    private void loadTrack() {
-
-        if (map == null) return;
-
-        // ======================
-        // RAW TRACK (rosso)
-        // ======================
-
-        if (DebugTrackStore.raw != null &&
-                !DebugTrackStore.raw.isEmpty()) {
-
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.raw)
-                            .color(Color.RED)
-                            .width(4)
-            );
-
-            // marker start
-            LatLng start = DebugTrackStore.raw.get(0);
-
-            map.addMarker(
-                    new MarkerOptions()
-                            .position(start)
-                            .title("START")
-            );
-
-            // marker end
-            LatLng end =
-                    DebugTrackStore.raw.get(
-                            DebugTrackStore.raw.size() - 1
-                    );
-
-            map.addMarker(
-                    new MarkerOptions()
-                            .position(end)
-                            .title("END")
-            );
+        if (statsView != null) {
+            statsView.setText(text);
         }
-
-        // ======================
-        // FILTERED TRACK (giallo)
-        // ======================
-
-        if (DebugTrackStore.filtered != null &&
-                !DebugTrackStore.filtered.isEmpty()) {
-
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.filtered)
-                            .color(Color.YELLOW)
-                            .width(6)
-            );
-        }
-
-        // ======================
-        // SIMPLIFIED TRACK (verde)
-        // ======================
-
-        if (DebugTrackStore.simplified != null &&
-                !DebugTrackStore.simplified.isEmpty()) {
-
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.simplified)
-                            .color(Color.GREEN)
-                            .width(8)
-            );
-        }
-
-        moveCamera();
     }
+
 
     private void moveCamera() {
 
-        if (map == null) return;
+        if (cameraMoved) return;
 
-        if (DebugTrackStore.raw == null ||
-                DebugTrackStore.raw.isEmpty()) return;
+        if (DebugTrackStore.raw == null || DebugTrackStore.raw.isEmpty()) return;
 
-        LatLng last = DebugTrackStore.raw.get(
-                DebugTrackStore.raw.size() - 1
-        );
+        LatLng last = DebugTrackStore.raw.get(DebugTrackStore.raw.size() - 1);
 
-        map.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(last, 17f)
-        );
+        map.moveCamera(CameraUpdateFactory.newLatLngZoom(last, 16f));
+
+        cameraMoved = true;
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         isOpen = false;
-        // pulizia memoria debug
-        DebugTrackStore.clear();
     }
+
 }
+
 
 
