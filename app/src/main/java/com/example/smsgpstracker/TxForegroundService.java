@@ -2438,6 +2438,32 @@ public class TxForegroundService extends Service {
         Log.d("ADAPTIVE", "Applied new config");
     }
 
+    private String buildSafeSms(String encoded, int seq) {
+
+        String header = "TX|" + currentSessionId + "|" + seq + "|D|";
+
+        String payload = header + encoded;
+
+        String full = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+
+        // 🔥 HARD CUT ASSOLUTO
+        if (full.length() > 140) {
+
+            int maxPayloadLen = 140
+                    - header.length()
+                    - 3; // CRC
+
+            if (encoded.length() > maxPayloadLen) {
+                encoded = encoded.substring(0, maxPayloadLen);
+            }
+
+            payload = header + encoded;
+            full = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+        }
+
+        return full;
+    }
+
     private void processTrackBuffer() {
 
 
@@ -2507,16 +2533,36 @@ public class TxForegroundService extends Service {
                     List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
 
                     // ================================
-                    // 🔴 FIX 3 — LIMITAZIONE PUNTI (CRITICO CICLI LUNGHI)
+                    // 🔴 SMART POINT REDUCTION (NO LOSS TRACK)
                     // ================================
                     if (latLngPoints.size() > 300) {
 
-                        Log.w("ADAPT", "TOO MANY POINTS → pre-trim: " + latLngPoints.size());
+                        Log.w("ADAPT", "SMART REDUCTION → original: " + latLngPoints.size());
 
-                        latLngPoints = latLngPoints.subList(
-                                latLngPoints.size() - 300,
+                        // 🔥 mantieni inizio + fine + campionamento centrale
+                        List<LatLng> reduced = new ArrayList<>();
+
+                        int keepHead = 50;
+                        int keepTail = 50;
+
+                        // START
+                        reduced.addAll(latLngPoints.subList(0, keepHead));
+
+                        // MIDDLE (sampling)
+                        int step = latLngPoints.size() / 200;
+                        for (int i = keepHead; i < latLngPoints.size() - keepTail; i += step) {
+                            reduced.add(latLngPoints.get(i));
+                        }
+
+                        // END
+                        reduced.addAll(latLngPoints.subList(
+                                latLngPoints.size() - keepTail,
                                 latLngPoints.size()
-                        );
+                        ));
+
+                        latLngPoints = reduced;
+
+                        Log.w("ADAPT", "AFTER REDUCTION → " + latLngPoints.size());
                     }
                     // ================================
                     // 🎯 PARAMETRI SMS (UNA SOLA VOLTA)
@@ -2542,7 +2588,7 @@ public class TxForegroundService extends Service {
                     CompressionResult bestResult = null;
                     int bestSmsLen = Integer.MAX_VALUE;
 
-                    float tolerance = trackSimplifyTolerance;
+                    float tolerance = trackSimplifyTolerance * 0.7f;
 
                     String payload;
                     int smsLen;
@@ -2700,18 +2746,7 @@ public class TxForegroundService extends Service {
                         DebugTrackStore.timeHistory.add(now);
                     }
 
-                    // 🔥 HARD LIMIT SMS LENGTH (CRITICO)
-                    if (smsLen > 140) {
 
-                        int maxPayloadLen = 140
-                                - headerLen
-                                - crcLen
-                                - 2;
-
-                        if (res.encoded.length() > maxPayloadLen) {
-                            res.encoded = res.encoded.substring(0, maxPayloadLen);
-                        }
-                    }
 
             Log.d("ADAPT", "FINAL len=" + res.encoded.length());
 
@@ -2731,7 +2766,24 @@ public class TxForegroundService extends Service {
             // 🔥 chunk size calcolato UNA VOLTA
             int chunkSize = maxSmsLen - headerLen - crcLen - safetyMargin;
 
-            List<String> parts = splitEncoded(encoded, chunkSize);
+                    List<String> parts = new ArrayList<>();
+
+                    int seqBase = currentSeq + 1;
+
+                    List<String> rawParts = splitEncoded(encoded, chunkSize);
+
+                    for (int i = 0; i < rawParts.size(); i++) {
+
+                        String safeSms = buildSafeSms(rawParts.get(i), seqBase + i);
+
+                        // 🔥 GARANZIA ASSOLUTA
+                        if (safeSms.length() > 140) {
+                            Log.e("SMS", "OVERFLOW BLOCCATO → " + safeSms.length());
+                            safeSms = safeSms.substring(0, 140);
+                        }
+
+                        parts.add(safeSms);
+                    }
             int totalParts = parts.size();
 
             // 🔥 RICALCOLO SICURO
@@ -2796,7 +2848,7 @@ public class TxForegroundService extends Service {
     }
     private int computeChunkSizeSafe(int totalParts, int headerLen) {
 
-        int maxSmsLen = 140;
+        int maxSmsLen = 135;
         int crcLen = 3;
         int safetyMargin = 10;
 
