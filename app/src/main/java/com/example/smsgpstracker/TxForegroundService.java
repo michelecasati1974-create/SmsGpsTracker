@@ -2406,16 +2406,10 @@ public class TxForegroundService extends Service {
                         seq + "|" +
                         type + "|";
 
-                // 🔥 payload originale (solo dati)
-                String payloadRaw = parts.get(index);
+                // 🔥 payload già pronto (NON ricodificare!)
+                String payload = parts.get(index);
 
-                // 🔥 encode Base64
-                String payloadEncoded = encodeBase64(payloadRaw);
-
-                // 🔥 costruzione messaggio con payload ENCODATO
-                String payload = header + payloadEncoded;
-
-                // 🔥 CRC sul payload codificato
+                // 🔥 CRC sul contenuto reale
                 String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
 
                 sendTrackSms(sms);
