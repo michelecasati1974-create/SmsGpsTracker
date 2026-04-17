@@ -617,6 +617,7 @@ public class TxForegroundService extends Service {
             if (smsSent >= maxSmsPerSession) {
 
                 Log.d("TX_SMS","Max SMS reached");
+                Log.e("STOP_DEBUG", "STOP → motivo XYZ");
                 stopTrackingInternal();
                 return;
             }
@@ -1076,6 +1077,7 @@ public class TxForegroundService extends Service {
             if (!isRunning || !multiGpsMode) return;
 
             processTrackBuffer();
+            Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
 
             trackHandler.postDelayed(this, multiGpsSendIntervalMs);
         }
@@ -1204,6 +1206,9 @@ public class TxForegroundService extends Service {
 
         String action = intent.getAction();
 
+
+        Log.e("STOP_DEBUG", "onStartCommand action=" + action);
+
         if (ACTION_START.equals(action)) {
 
             currentSessionId = generateSessionId();
@@ -1303,6 +1308,8 @@ public class TxForegroundService extends Service {
         //--------------------------------
         if (ACTION_STOP.equals(action)) {
 
+            Log.e("STOP_DEBUG", "ACTION_STOP RECEIVED");
+
             Log.d("TX_SERVICE", "STOP ACTION RECEIVED");
 
             sessionEndTime = System.currentTimeMillis();
@@ -1320,8 +1327,10 @@ public class TxForegroundService extends Service {
                 Log.d("TRACK", "STOP → FINAL FLUSH START");
 
                 isFinalFlush = true;
+                Log.e("STOP_DEBUG", "isFinalFlush = TRUE", new Exception());
 
                 processTrackBuffer(); // 🔥 unico punto generazione F
+                Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
             } else {
 
                 // ================================
@@ -1388,6 +1397,7 @@ public class TxForegroundService extends Service {
             // ================================
             // STOP REALE SERVIZIO
             // ================================
+            Log.e("STOP_DEBUG", "STOP → motivo XYZ");
             stopTrackingInternal();
 
             saveTxState("IDLE");
@@ -1402,6 +1412,7 @@ public class TxForegroundService extends Service {
         // ABORT
         //--------------------------------
         if ("ACTION_ABORT".equals(action)) {
+            Log.e("STOP_DEBUG", "STOP → motivo XYZ");
             stopTrackingInternal();
             return START_STICKY;
         }
@@ -2081,7 +2092,7 @@ public class TxForegroundService extends Service {
             saveSmsLog();
 
             saveTxState("IDLE");
-
+            Log.e("STOP_DEBUG", "STOP → motivo XYZ");
             stopTrackingInternal();
 
             return;
@@ -2371,7 +2382,7 @@ public class TxForegroundService extends Service {
 
                 // 🔥 BLOCCO 2 — F già inviato
                 if (finalSmsSent) {
-                    Log.w("SEQ", "SMS DROPPATO → final già inviato");
+                    Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
                     return;
                 }
 
@@ -2390,7 +2401,7 @@ public class TxForegroundService extends Service {
                 if (isFinal) {
 
                     if (finalSmsSent) {
-                        Log.w("TRACK", "F DUPLICATO BLOCCATO");
+                        Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
                         return;
                     }
 
@@ -2461,11 +2472,14 @@ public class TxForegroundService extends Service {
     private void processTrackBuffer() {
 
 
-                Log.d("TRACK", "processTrackBuffer CALLED | final=" + finalSmsSent + " flush=" + isFinalFlush);
+        Log.e("STOP_DEBUG",
+                "processTrackBuffer CALLED | final=" + finalSmsSent +
+                        " flush=" + isFinalFlush,
+                new Exception());
 
                 // 🔥 BLOCCO TOTALE DOPO F (sempre)
                 if (finalSmsSent) {
-                    Log.w("TRACK", "PROCESS BLOCCATO → F già inviato");
+                    Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
                     return;
                 }
 
@@ -2747,10 +2761,11 @@ public class TxForegroundService extends Service {
             // ================================
             // 🚫 LIMITE SESSIONE
             // ================================
-            if (smsSent >= maxSmsPerSession) {
-                stopTrackingInternal();
-                return;
-            }
+                    if (smsSent >= maxSmsPerSession) {
+                        Log.e("STOP_DEBUG", "STOP → MAX SMS REACHED: " + smsSent);
+                        stopTrackingInternal();
+                        return;
+                    }
 
             // ================================
             // ✂️ SPLIT SMS (RIUSA VARIABILI)
@@ -2872,9 +2887,15 @@ public class TxForegroundService extends Service {
 
     private void stopTrackingInternal() {
 
-        isFinalFlush = true; // ?? AGGIUNTA
+        Log.e("STOP_DEBUG", "stopTrackingInternal CALLED", new Exception());
 
-        // ?? INVIA ULTIMO BATCH
+        // 👇 AGGIUNGI QUESTO SUBITO DOPO
+        Log.e("STOP_DEBUG", "isRunning=" + isRunning +
+                " finalSmsSent=" + finalSmsSent +
+                " isFinalFlush=" + isFinalFlush);
+
+        isFinalFlush = true;
+        Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
         processTrackBuffer();
 
 
@@ -2887,6 +2908,7 @@ public class TxForegroundService extends Service {
         if (!isRunning) return;
 
         isRunning = false;
+        Log.e("STOP_DEBUG", "isRunning → FALSE");
 
         handler.removeCallbacksAndMessages(null);
 
