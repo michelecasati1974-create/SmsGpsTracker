@@ -2471,69 +2471,76 @@ public class TxForegroundService extends Service {
 
     private void processTrackBuffer() {
 
-
         Log.e("STOP_DEBUG",
                 "processTrackBuffer CALLED | final=" + finalSmsSent +
                         " flush=" + isFinalFlush,
                 new Exception());
 
-                // 🔥 BLOCCO TOTALE DOPO F (sempre)
-                if (finalSmsSent) {
-                    Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
+        // 🔴 BLOCCO TOTALE DOPO F
+        if (finalSmsSent) {
+            Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
+            return;
+        }
+
+        // 🔴 FIX 3 — protezione flush fantasma
+        if (isFinalFlush && !finalFlushStarted.get()) {
+            Log.e("STOP_DEBUG", "FLUSH BLOCCATO → non autorizzato");
+            isFinalFlush = false;
+        }
+
+        // ================================
+        // 🔒 LOCK PROCESSING
+        // ================================
+        synchronized (processingLock) {
+            if (!isRunning || !multiGpsMode || isProcessing) {
+                return;
+            }
+            isProcessing = true;
+        }
+
+        try {
+
+            List<GpsPoint> rawPoints;
+
+            // ================================
+            // 📦 BUFFER READ
+            // ================================
+            synchronized (bufferLock) {
+
+                List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
+
+                // 🔴 BUFFER VUOTO
+                if (current == null || current.isEmpty()) {
+
+                    if (isFinalFlush && !finalSmsSent) {
+
+                        Log.e("STOP_DEBUG", "INVIO END (flush reale)");
+
+                        List<String> parts = new ArrayList<>();
+                        parts.add("END");
+
+                        // 🔴 FIX 1 — usa flush reale
+                        boolean isRealFinalFlush = finalFlushStarted.get();
+                        sendSmsPartsSequentially(parts, isRealFinalFlush);
+
+                        // 🔴 FIX 2 — reset immediato
+                        isFinalFlush = false;
+
+                        return;
+                    }
+
                     return;
                 }
 
-                // ================================
-                // 🔒 LOCK PROCESSING (ATOMICO)
-                // ================================
-                synchronized (processingLock) {
-                    if (!isRunning || !multiGpsMode || isProcessing) {
-                        return;
-                    }
-                    isProcessing = true;
+                // 🔴 evita invio parziale
+                if (!isFinalFlush && current.size() < 10) {
+                    return;
                 }
 
-                try {
+                rawPoints = new ArrayList<>(current);
+            }
 
-                    List<GpsPoint> rawPoints;
-
-                    // ================================
-                    // 📦 BUFFER READ (THREAD SAFE)
-                    // ================================
-                    synchronized (bufferLock) {
-
-                        List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-
-                        if (current == null || current.isEmpty()) {
-
-                            // 🔥 CASO CRITICO → BUFFER VUOTO + FLUSH
-                            if (current == null || current.isEmpty()) {
-
-                                if (isFinalFlush && !finalSmsSent) {
-
-                                    List<String> parts = new ArrayList<>();
-                                    parts.add("END");
-
-                                    sendSmsPartsSequentially(parts, true);
-
-                                    return;
-                                }
-
-                                return;
-                            }
-
-                            return;
-                        }
-
-                        // 🔥 NO INVIO PARZIALE SE NON FLUSH
-                        if (!isFinalFlush && current.size() < 10) {
-                            return;
-                        }
-
-                        rawPoints = new ArrayList<>(current);
-                    }
-
-                    long now = System.currentTimeMillis();
+            long now = System.currentTimeMillis();
 
                     // ================================
                     // 📍 CONVERSIONE
@@ -2761,11 +2768,11 @@ public class TxForegroundService extends Service {
             // ================================
             // 🚫 LIMITE SESSIONE
             // ================================
-                    if (smsSent >= maxSmsPerSession) {
-                        Log.e("STOP_DEBUG", "STOP → MAX SMS REACHED: " + smsSent);
-                        stopTrackingInternal();
-                        return;
-                    }
+            if (smsSent >= maxSmsPerSession) {
+                Log.e("STOP_DEBUG", "STOP → MAX SMS REACHED: " + smsSent);
+                stopTrackingInternal();
+                return;
+            }
 
             // ================================
             // ✂️ SPLIT SMS (RIUSA VARIABILI)
@@ -2806,7 +2813,11 @@ public class TxForegroundService extends Service {
             // ================================
             // 🚀 INVIO SEQUENZIALE
             // ================================
-            sendSmsPartsSequentially(parts, isFinalFlush);
+            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
+            sendSmsPartsSequentially(parts, isRealFinalFlush);
+
+            // 🔥 reset SEMPRE dopo invio
+            isFinalFlush = false;
 
             // ================================
             // 🔥 GESTIONE FLUSH
