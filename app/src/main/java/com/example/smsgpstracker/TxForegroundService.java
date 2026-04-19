@@ -1184,7 +1184,9 @@ public class TxForegroundService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 
-
+        Log.e("STOP_FLOW",
+                "onStartCommand ACTION=" + (intent != null ? intent.getAction() : "NULL"),
+                new Exception());
 
         noSignalAlertEnabled = intent.getBooleanExtra("noSignalAlert", false);
 
@@ -1211,13 +1213,15 @@ public class TxForegroundService extends Service {
 
         if (ACTION_START.equals(action)) {
 
+            Log.e("STOP_FLOW", "ENTER ACTION_START");
+
             currentSessionId = generateSessionId();
             currentSeq = 0;
 
             // 🔥 RESET CRITICO (QUI!)
             finalFlushStarted.set(false);
             finalSmsSent = false;
-            isFinalFlush = false;
+            setFinalFlush(false, "processTrackBuffer RESET");
 
             String mode = intent.getStringExtra("MODE");
             if (mode == null) mode = "STANDARD";
@@ -1308,6 +1312,10 @@ public class TxForegroundService extends Service {
         //--------------------------------
         if (ACTION_STOP.equals(action)) {
 
+            Log.e("STOP_FLOW",
+                    "ENTER ACTION_STOP",
+                    new Exception());
+
             Log.e("STOP_DEBUG", "ACTION_STOP RECEIVED");
 
             Log.d("TX_SERVICE", "STOP ACTION RECEIVED");
@@ -1326,7 +1334,7 @@ public class TxForegroundService extends Service {
 
                 Log.d("TRACK", "STOP → FINAL FLUSH START");
 
-                isFinalFlush = true;
+                setFinalFlush(true, "ACTION_STOP");
                 Log.e("STOP_DEBUG", "isFinalFlush = TRUE", new Exception());
 
                 processTrackBuffer(); // 🔥 unico punto generazione F
@@ -2370,58 +2378,40 @@ public class TxForegroundService extends Service {
 
             final int index = i;
 
-            long delay = i * 300L; // 🔥 sequenza reale
+            long delay = i * 300L;
 
             txHandler.postDelayed(() -> {
 
-                // 🔥 BLOCCO 1 — sessione cambiata
+                // 🔒 sessione cambiata
                 if (!sessionSnapshot.equals(currentSessionId)) {
-                    Log.w("SEQ", "SMS DROPPATO → session changed");
+                    Log.w("SEQ", "DROP → session changed");
                     return;
                 }
 
-                // 🔥 BLOCCO 2 — F già inviato
+                // 🔒 blocco dopo F
                 if (finalSmsSent) {
-                    Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
+                    Log.e("SEQ", "DROP → finalSmsSent=true");
                     return;
                 }
-
-                int seq = nextSeq();
 
                 boolean isFinal = isFinalFlush && index == totalParts - 1;
 
-                // 🔥 BLOCCO 3 — evita D durante flush finale
+                // 🔥 evita D durante flush finale
                 if (isFinalFlush && !isFinal) {
-                    Log.w("SEQ", "SMS DROPPATO → flush finale in corso");
+                    Log.w("SEQ", "DROP → flush finale (solo F)");
                     return;
                 }
 
-                String type = isFinal ? "F" : "D";
+                // 🔴 SMS GIÀ PRONTO
+                String sms = parts.get(index);
 
+                // 🔥 marca F
                 if (isFinal) {
-
-                    if (finalSmsSent) {
-                        Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
-                        return;
-                    }
-
                     finalSmsSent = true;
-
-                    Log.d("TRACK", "FINAL SMS SENT → LOCK ACTIVATED");
+                    Log.d("TRACK", "FINAL SMS SENT");
                 }
 
-                Log.d("SEQ", "SEND seq=" + seq + " type=" + type);
-
-                String header = "TX|" +
-                        currentSessionId + "|" +
-                        seq + "|" +
-                        type + "|";
-
-                // 🔥 payload già pronto (NON ricodificare!)
-                String payload = parts.get(index);
-
-                // 🔥 CRC sul contenuto reale
-                String sms = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+                Log.d("SEQ", "SEND → " + sms);
 
                 sendTrackSms(sms);
 
@@ -2476,6 +2466,7 @@ public class TxForegroundService extends Service {
                         " flush=" + isFinalFlush,
                 new Exception());
 
+
         // 🔴 BLOCCO TOTALE DOPO F
         if (finalSmsSent) {
             Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
@@ -2485,7 +2476,7 @@ public class TxForegroundService extends Service {
         // 🔴 FIX 3 — protezione flush fantasma
         if (isFinalFlush && !finalFlushStarted.get()) {
             Log.e("STOP_DEBUG", "FLUSH BLOCCATO → non autorizzato");
-            isFinalFlush = false;
+            setFinalFlush(false, "processTrackBuffer RESET");
         }
 
         // ================================
@@ -2521,10 +2512,13 @@ public class TxForegroundService extends Service {
 
                         // 🔴 FIX 1 — usa flush reale
                         boolean isRealFinalFlush = finalFlushStarted.get();
+                        Log.e("STOP_TRACE",
+                                "INVIO SMS | isFinalFlush=" + isFinalFlush +
+                                        " realFlush=" + isRealFinalFlush);
                         sendSmsPartsSequentially(parts, isRealFinalFlush);
 
                         // 🔴 FIX 2 — reset immediato
-                        isFinalFlush = false;
+                        setFinalFlush(false, "processTrackBuffer RESET");
 
                         return;
                     }
@@ -2533,7 +2527,7 @@ public class TxForegroundService extends Service {
                 }
 
                 // 🔴 evita invio parziale
-                if (!isFinalFlush && current.size() < 10) {
+                if (!isFinalFlush && current.size() < 3) {
                     return;
                 }
 
@@ -2769,8 +2763,7 @@ public class TxForegroundService extends Service {
             // 🚫 LIMITE SESSIONE
             // ================================
             if (smsSent >= maxSmsPerSession) {
-                Log.e("STOP_DEBUG", "STOP → MAX SMS REACHED: " + smsSent);
-                stopTrackingInternal();
+                Log.e("STOP_DEBUG", "IGNORO LIMITE PER TEST");
                 return;
             }
 
@@ -2782,33 +2775,37 @@ public class TxForegroundService extends Service {
             // 🔥 chunk size calcolato UNA VOLTA
             int chunkSize = maxSmsLen - headerLen - crcLen - safetyMargin;
 
-                    List<String> parts = new ArrayList<>();
+            // ================================
+            // 🚀 COSTRUZIONE SMS CORRETTA
+            // ================================
+            List<String> parts = new ArrayList<>();
 
-                    int seqBase = currentSeq + 1;
+            List<String> rawParts = splitEncoded(res.encoded, chunkSize);
 
-                    List<String> rawParts = splitEncoded(encoded, chunkSize);
+            for (int i = 0; i < rawParts.size(); i++) {
 
-                    for (int i = 0; i < rawParts.size(); i++) {
+                int seq = nextSeq();
+                boolean isFinal = isFinalFlush && i == rawParts.size() - 1;
+                String type = isFinal ? "F" : "D";
 
-                        String safeSms = buildSafeSms(rawParts.get(i), seqBase + i);
+                String header = "TX|" +
+                        currentSessionId + "|" +
+                        seq + "|" +
+                        type + "|";
 
-                        // 🔥 GARANZIA ASSOLUTA
-                        if (safeSms.length() > 140) {
-                            Log.e("SMS", "OVERFLOW BLOCCATO → " + safeSms.length());
-                            safeSms = safeSms.substring(0, 140);
-                        }
+                String payloadPart = rawParts.get(i);
 
-                        parts.add(safeSms);
-                    }
-            int totalParts = parts.size();
+                String full = header + payloadPart;
 
-            // 🔥 RICALCOLO SICURO
-            chunkSize = computeChunkSizeSafe(totalParts, headerLen);
-            parts = splitEncoded(encoded, chunkSize);
+                String sms = full + "|" + SmsCrc.INSTANCE.crc8(full);
 
-            // 🔥 RICALCOLO SICURO..
-            chunkSize = computeChunkSizeSafe(totalParts, headerLen);
-            parts = splitEncoded(encoded, chunkSize);
+                if (sms.length() > 140) {
+                    sms = sms.substring(0, 140);
+                }
+
+                parts.add(sms);
+            }
+
 
             // ================================
             // 🚀 INVIO SEQUENZIALE
@@ -2817,13 +2814,13 @@ public class TxForegroundService extends Service {
             sendSmsPartsSequentially(parts, isRealFinalFlush);
 
             // 🔥 reset SEMPRE dopo invio
-            isFinalFlush = false;
+            setFinalFlush(false, "processTrackBuffer RESET");
 
             // ================================
             // 🔥 GESTIONE FLUSH
             // ================================
             boolean wasFinalFlush = isFinalFlush;
-            isFinalFlush = false;
+            setFinalFlush(false, "processTrackBuffer RESET");
 
             lastTrackSmsTime = now;
 
@@ -2885,6 +2882,14 @@ public class TxForegroundService extends Service {
         return chunk;
     }
 
+    private void setFinalFlush(boolean value, String source) {
+        isFinalFlush = value;
+
+        Log.e("STOP_TRACE",
+                "isFinalFlush=" + value + " FROM=" + source,
+                new Exception());
+    }
+
     private List<LatLng> convertGpsPointsToLatLng(List<GpsPoint> list) {
 
         List<LatLng> out = new ArrayList<>();
@@ -2899,13 +2904,16 @@ public class TxForegroundService extends Service {
     private void stopTrackingInternal() {
 
         Log.e("STOP_DEBUG", "stopTrackingInternal CALLED", new Exception());
+        Log.e("STOP_FLOW",
+                "stopTrackingInternal ENTRY",
+                new Exception());
 
         // 👇 AGGIUNGI QUESTO SUBITO DOPO
         Log.e("STOP_DEBUG", "isRunning=" + isRunning +
                 " finalSmsSent=" + finalSmsSent +
                 " isFinalFlush=" + isFinalFlush);
 
-        isFinalFlush = true;
+        setFinalFlush(true, "ACTION_STOP");
         Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
         processTrackBuffer();
 
