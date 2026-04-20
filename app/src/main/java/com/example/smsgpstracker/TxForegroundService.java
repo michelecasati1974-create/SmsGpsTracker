@@ -2477,6 +2477,7 @@ public class TxForegroundService extends Service {
         if (isFinalFlush && !finalFlushStarted.get()) {
             Log.e("STOP_DEBUG", "FLUSH BLOCCATO → non autorizzato");
             setFinalFlush(false, "processTrackBuffer RESET");
+            return; // 🔴 FONDAMENTALE
         }
 
         // ================================
@@ -2810,17 +2811,17 @@ public class TxForegroundService extends Service {
             // ================================
             // 🚀 INVIO SEQUENZIALE
             // ================================
+            // 🔥 salva stato PRIMA
+            boolean wasFinalFlush = isFinalFlush;
+
+            // 🔥 invio
             boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
             sendSmsPartsSequentially(parts, isRealFinalFlush);
 
-            // 🔥 reset SEMPRE dopo invio
-            setFinalFlush(false, "processTrackBuffer RESET");
-
-            // ================================
-            // 🔥 GESTIONE FLUSH
-            // ================================
-            boolean wasFinalFlush = isFinalFlush;
-            setFinalFlush(false, "processTrackBuffer RESET");
+            // 🔥 reset SOLO se era flush vero
+            if (wasFinalFlush) {
+                setFinalFlush(false, "processTrackBuffer RESET");
+            }
 
             lastTrackSmsTime = now;
 
