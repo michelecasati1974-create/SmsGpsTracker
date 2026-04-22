@@ -70,6 +70,8 @@ public class TxForegroundService extends Service {
     private boolean finalSmsSent = false;
     private boolean isStopping = false;
 
+    private boolean trackRunnableScheduled = false;
+
 
     private long helpMeThresholdMs = 0;
 
@@ -1077,9 +1079,17 @@ public class TxForegroundService extends Service {
             if (!isRunning || !multiGpsMode) return;
 
             processTrackBuffer();
-            Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
 
-            trackHandler.postDelayed(this, multiGpsSendIntervalMs);
+            if (isFinalFlush) {
+                Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED (RUNNABLE)");
+            }
+
+            // 🔴 STOP DOPO FINALE
+            if (isRunning && multiGpsMode && !finalSmsSent) {
+                trackHandler.postDelayed(this, multiGpsSendIntervalMs);
+            } else {
+                Log.d("TRACK", "Runnable STOPPED");
+            }
         }
     };
 
@@ -1184,8 +1194,10 @@ public class TxForegroundService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 
-        Log.e("STOP_FLOW",
-                "onStartCommand ACTION=" + (intent != null ? intent.getAction() : "NULL"),
+        Log.e("SERVICE_LIFECYCLE",
+                "onStartCommand PID=" + android.os.Process.myPid() +
+                        " intent=" + intent +
+                        " action=" + (intent != null ? intent.getAction() : "NULL"),
                 new Exception());
 
         noSignalAlertEnabled = intent.getBooleanExtra("noSignalAlert", false);
@@ -1204,9 +1216,27 @@ public class TxForegroundService extends Service {
 
         startForeground(NOTIFICATION_ID, createNotification());
 
-        if (intent == null) return START_STICKY;
+// 🔴 CASO 1: restart totale
+        if (intent == null) {
+
+            Log.e("SERVICE", "⚠️ RESTART DA SISTEMA (intent=NULL)");
+
+            restoreStateOrStop();
+
+            return START_NOT_STICKY;
+        }
 
         String action = intent.getAction();
+
+// 🔴 CASO 2: restart sporco
+        if (action == null) {
+
+            Log.e("SERVICE", "⚠️ RESTART CON ACTION NULL");
+
+            restoreStateOrStop();
+
+            return START_NOT_STICKY;
+        }
 
 
         Log.e("STOP_DEBUG", "onStartCommand action=" + action);
@@ -1218,11 +1248,23 @@ public class TxForegroundService extends Service {
             currentSessionId = generateSessionId();
             currentSeq = 0;
 
-            // 🔥 RESET CRITICO (QUI!)
+            // ================================
+            // 🔥 RESET TOTALE SESSIONE
+            // ================================
             finalFlushStarted.set(false);
             finalSmsSent = false;
-            setFinalFlush(false, "processTrackBuffer RESET");
+            setFinalFlush(false, "ACTION_START RESET");
 
+            // 🔴 FIX CRITICO
+            trackRunnableScheduled = false;
+            trackHandler.removeCallbacks(trackProcessorRunnable);
+
+            isProcessing = false;
+
+            // opzionale ma utile debug
+            Log.d("TRACK", "RESET COMPLETO SESSIONE");
+
+            // ================================
             String mode = intent.getStringExtra("MODE");
             if (mode == null) mode = "STANDARD";
 
@@ -1247,24 +1289,6 @@ public class TxForegroundService extends Service {
             intervalMinutes = intent.getIntExtra("interval", 1);
 
             //--------------------------------
-            // MULTI GPS MODE (secondo ramo)
-            //--------------------------------
-            if ("MULTI_GPS_SMS".equals(mode)) {
-
-                Log.d("TX_SERVICE", "MULTI GPS MODE ATTIVO");
-
-                multiGpsMode = true;
-                continuousMode = false;
-
-                monitorIntervalMs = 5000;
-
-                startMultiGpsTracking();
-
-                return START_STICKY;
-            }
-
-
-            //--------------------------------
             // CONTINUOUS MODE
             //--------------------------------
             if ("CONTINUOUS".equals(mode)) {
@@ -1280,13 +1304,12 @@ public class TxForegroundService extends Service {
                     return START_NOT_STICKY;
                 }
 
-                startIntervalTracking(); // stesso scheduler ma senza limite
-
+                startIntervalTracking();
                 return START_STICKY;
             }
 
             //--------------------------------
-            // STANDARD INTERVAL MODE
+            // STANDARD MODE
             //--------------------------------
             Log.d("TX_SERVICE", "STANDARD MODE");
 
@@ -1448,6 +1471,38 @@ public class TxForegroundService extends Service {
         }
 
         return START_STICKY;
+    }
+
+    private void restoreStateOrStop() {
+
+        SharedPreferences prefs = getSharedPreferences("TX_STATE", MODE_PRIVATE);
+
+        boolean wasRunning = prefs.getBoolean("wasRunning", false);
+
+        if (!wasRunning) {
+            Log.e("SERVICE", "No active session → stopSelf()");
+            stopSelf();
+            return;
+        }
+
+        Log.e("SERVICE", "🔥 RIPRISTINO SESSIONE");
+
+        currentSessionId = prefs.getString("sessionId", generateSessionId());
+
+        finalFlushStarted.set(false);
+        finalSmsSent = false;
+        isFinalFlush = false;
+
+        isRunning = true;
+
+        // 🔥 fondamentale
+        trackRunnableScheduled = false;
+        trackHandler.removeCallbacks(trackProcessorRunnable);
+
+        if (multiGpsMode) {
+            trackRunnableScheduled = true;
+            trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
+        }
     }
 
     private void startMultiGpsMode(Intent intent) {
@@ -1690,6 +1745,7 @@ public class TxForegroundService extends Service {
     @Override
     public void onCreate() {
 
+        debugTrackEnabled = false;
         ContextCompat.registerReceiver(
                 this,
                 smsSentReceiver,
@@ -1706,6 +1762,9 @@ public class TxForegroundService extends Service {
                 prefs.getBoolean("debug_track", false);
         statePrefs = getSharedPreferences("tx_state_prefs", MODE_PRIVATE);
         super.onCreate();
+        Log.e("SERVICE_LIFECYCLE",
+                "SERVICE onCreate() PID=" + android.os.Process.myPid(),
+                new Exception());
         Log.d("TX_SERVICE", "Service created");
         seqPrefs = getSharedPreferences(SEQ_PREFS, MODE_PRIVATE);
         sequenceNumber = seqPrefs.getInt(KEY_SEQ, 0);
@@ -1720,6 +1779,7 @@ public class TxForegroundService extends Service {
     public void onDestroy() {
         unregisterReceiver(smsSentReceiver);
         super.onDestroy();
+        Log.e("SERVICE_LIFECYCLE", "onDestroy()", new Exception());
 
         Log.d("TX_SERVICE", "Service destroyed");
 
@@ -1732,6 +1792,50 @@ public class TxForegroundService extends Service {
         }
 
         stopForeground(true);
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Log.e("SERVICE_LIFECYCLE", "onTaskRemoved()");
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        Log.e("MEMORY", "onTrimMemory level=" + level);
+        super.onTrimMemory(level);
+    }
+
+    @Override
+    public void onLowMemory() {
+        Log.e("MEMORY", "onLowMemory()");
+        super.onLowMemory();
+    }
+
+    private static final int DEBUG_MAX_POINTS = 5000;
+
+    private void trimDebugStore() {
+
+        if (DebugTrackStore.raw.size() > DEBUG_MAX_POINTS) {
+            DebugTrackStore.raw =
+                    DebugTrackStore.raw.subList(
+                            DebugTrackStore.raw.size() - DEBUG_MAX_POINTS,
+                            DebugTrackStore.raw.size());
+        }
+
+        if (DebugTrackStore.filtered.size() > DEBUG_MAX_POINTS) {
+            DebugTrackStore.filtered =
+                    DebugTrackStore.filtered.subList(
+                            DebugTrackStore.filtered.size() - DEBUG_MAX_POINTS,
+                            DebugTrackStore.filtered.size());
+        }
+
+        if (DebugTrackStore.simplified.size() > DEBUG_MAX_POINTS) {
+            DebugTrackStore.simplified =
+                    DebugTrackStore.simplified.subList(
+                            DebugTrackStore.simplified.size() - DEBUG_MAX_POINTS,
+                            DebugTrackStore.simplified.size());
+        }
     }
 
 
@@ -1854,7 +1958,10 @@ public class TxForegroundService extends Service {
 
         if (multiGpsMode) {
 
-            trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
+            if (!trackRunnableScheduled) {
+                trackRunnableScheduled = true;
+                trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
+            }
 
             return;
         }
@@ -2369,7 +2476,7 @@ public class TxForegroundService extends Service {
         }
     }
 
-    private void sendSmsPartsSequentially(List<String> parts, boolean isFinalFlush) {
+    private void sendSmsPartsSequentially(List<String> parts, boolean isFinalFlushParam) {
 
         final String sessionSnapshot = currentSessionId;
         final int totalParts = parts.size();
@@ -2377,7 +2484,6 @@ public class TxForegroundService extends Service {
         for (int i = 0; i < totalParts; i++) {
 
             final int index = i;
-
             long delay = i * 300L;
 
             txHandler.postDelayed(() -> {
@@ -2394,18 +2500,20 @@ public class TxForegroundService extends Service {
                     return;
                 }
 
-                boolean isFinal = isFinalFlush && index == totalParts - 1;
+                // 🔥 USA LO STATO REALE (NON IL PARAMETRO!)
+                boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
 
-                // 🔥 evita D durante flush finale
-                if (isFinalFlush && !isFinal) {
+                boolean isFinal = isRealFinalFlush && index == totalParts - 1;
+
+                // 🔥 evita D SOLO se flush reale
+                if (isRealFinalFlush && !isFinal) {
                     Log.w("SEQ", "DROP → flush finale (solo F)");
                     return;
                 }
 
-                // 🔴 SMS GIÀ PRONTO
                 String sms = parts.get(index);
 
-                // 🔥 marca F
+                // 🔥 marca F solo se reale
                 if (isFinal) {
                     finalSmsSent = true;
                     Log.d("TRACK", "FINAL SMS SENT");
@@ -2461,6 +2569,22 @@ public class TxForegroundService extends Service {
 
     private void processTrackBuffer() {
 
+        Log.e("FLUSH_STATE",
+                "ENTER processTrackBuffer | isFinalFlush=" + isFinalFlush +
+                        " | finalStarted=" + finalFlushStarted.get() +
+                        " | finalSent=" + finalSmsSent +
+                        " | isRunning=" + isRunning,
+                new Exception());
+
+        if (isFinalFlush && !finalFlushStarted.get()) {
+
+            Log.e("FLUSH_GHOST",
+                    "👻 GHOST FLUSH DETECTED → qualcuno ha settato isFinalFlush=true senza autorizzazione",
+                    new Exception());
+
+            return;
+        }
+
         Log.e("STOP_DEBUG",
                 "processTrackBuffer CALLED | final=" + finalSmsSent +
                         " flush=" + isFinalFlush,
@@ -2475,10 +2599,10 @@ public class TxForegroundService extends Service {
 
         // 🔴 FIX 3 — protezione flush fantasma
         if (isFinalFlush && !finalFlushStarted.get()) {
-            Log.e("STOP_DEBUG", "FLUSH BLOCCATO → non autorizzato");
-            setFinalFlush(false, "processTrackBuffer RESET");
-            return; // 🔴 FONDAMENTALE
+            Log.e("STOP_DEBUG", "🚨 FLUSH FANTASMA IGNORATO");
+            return;
         }
+
 
         // ================================
         // 🔒 LOCK PROCESSING
@@ -2574,6 +2698,15 @@ public class TxForegroundService extends Service {
 
                         Log.w("ADAPT", "AFTER REDUCTION → " + latLngPoints.size());
                     }
+                    // 🔴 HARD LIMIT DOPO
+                        if (latLngPoints.size() > 200) {
+                         latLngPoints = new ArrayList<>(
+                        latLngPoints.subList(
+                                latLngPoints.size() - 200,
+                                latLngPoints.size()
+                             )
+                         );
+                        }
                     // ================================
                     // 🎯 PARAMETRI SMS (UNA SOLA VOLTA)
                     // ================================
@@ -2603,7 +2736,7 @@ public class TxForegroundService extends Service {
                     String payload;
                     int smsLen;
 
-                    for (int i = 0; i < 10; i++) {
+                    for (int i = 0; i < 3; i++) {
 
                         CompressionResult temp = AdaptiveSmsCompressor.compressToSms(
                                 latLngPoints,
@@ -2656,7 +2789,7 @@ public class TxForegroundService extends Service {
                     // 🔥 sicurezza assoluta
                     int safety = 0;
 
-                    while (smsLen > 140 && safety < 10) {
+                    while (smsLen > 140 && safety < 3) {
 
                         Log.w("ADAPT", "FORCE COMPRESSION → smsLen=" + smsLen);
 
@@ -2703,58 +2836,107 @@ public class TxForegroundService extends Service {
                         safety++;
                     }
 
-                    // ================================
-                    // 📊 DEBUG STORE
-                    // ================================
+            // ================================
+// 📊 DEBUG STORE (SAFE VERSION)
+// ================================
 
-                    if (debugTrackEnabled) {
-                        DebugTrackStore.smsHistory.add(smsLen);
-                    }
+            if (debugTrackEnabled && res != null) {
 
-                    Log.d("ADAPT", "FINAL smsLen BEST");
+                final int MAX_DEBUG_POINTS = 2000;
+                final int MAX_HISTORY = 200;
 
-                    if (debugTrackEnabled && res != null) {
+                // =========================
+                // 🔴 HARD LIMIT (anti OOM)
+                // =========================
+                if (DebugTrackStore.raw.size() > MAX_DEBUG_POINTS) {
 
-                        // =========================
-                        // 🔴 RAW (ACCUMULATO CORRETTO)
-                        // =========================
-                        DebugTrackStore.raw.addAll(latLngPoints);
-                        DebugTrackStore.rawCount = DebugTrackStore.raw.size();
+                    Log.w("MEMORY", "DEBUG RESET → overflow");
 
-                        // =========================
-                        // 🟡 FILTERED
-                        // =========================
-                        List<LatLng> filteredPoints =
-                                BasicFilter.apply(latLngPoints,
-                                        (float) trackSimplifyDistance,
-                                        (float) trackAngleThreshold);
+                    DebugTrackStore.raw.clear();
+                    DebugTrackStore.filtered.clear();
+                    DebugTrackStore.simplified.clear();
 
-                        DebugTrackStore.filtered.addAll(filteredPoints);
-                        DebugTrackStore.filteredCount = DebugTrackStore.filtered.size();
+                    DebugTrackStore.rawHistory.clear();
+                    DebugTrackStore.filteredHistory.clear();
+                    DebugTrackStore.simplifiedHistory.clear();
+                    DebugTrackStore.timeHistory.clear();
+                }
 
-                        // =========================
-                        // 🟢 SIMPLIFIED
-                        // =========================
-                        List<LatLng> simplifiedPoints =
-                                TrackSimplifier.simplify(filteredPoints, res.usedEpsilon);
+                // =========================
+                // 🔴 RAW (LIMITATO)
+                // =========================
+                if (DebugTrackStore.raw.size() < MAX_DEBUG_POINTS) {
+                    DebugTrackStore.raw.addAll(latLngPoints.subList(0, Math.min(20, latLngPoints.size())));
+                }
 
-                        DebugTrackStore.simplified.addAll(simplifiedPoints);
-                        DebugTrackStore.simplifiedCount = DebugTrackStore.simplified.size();
+                if (DebugTrackStore.raw.size() > MAX_DEBUG_POINTS) {
+                    DebugTrackStore.raw = DebugTrackStore.raw.subList(
+                            DebugTrackStore.raw.size() - MAX_DEBUG_POINTS,
+                            DebugTrackStore.raw.size()
+                    );
+                }
 
-                        // =========================
-                        // 📊 DEBUG INFO
-                        // =========================
-                        DebugTrackStore.lastSms = res.encoded;
-                        DebugTrackStore.smsLength = res.encoded.length();
+                DebugTrackStore.rawCount = DebugTrackStore.raw.size();
 
-                        // =========================
-                        // 📈 HISTORY
-                        // =========================
-                        DebugTrackStore.rawHistory.add(latLngPoints.size());
-                        DebugTrackStore.filteredHistory.add(filteredPoints.size());
-                        DebugTrackStore.simplifiedHistory.add(simplifiedPoints.size());
-                        DebugTrackStore.timeHistory.add(now);
-                    }
+                // =========================
+                // 🟡 FILTERED
+                // =========================
+                List<LatLng> filteredPoints =
+                        BasicFilter.apply(latLngPoints,
+                                (float) trackSimplifyDistance,
+                                (float) trackAngleThreshold);
+
+                DebugTrackStore.filtered.addAll(filteredPoints);
+
+                if (DebugTrackStore.filtered.size() > MAX_DEBUG_POINTS) {
+                    DebugTrackStore.filtered = DebugTrackStore.filtered.subList(
+                            DebugTrackStore.filtered.size() - MAX_DEBUG_POINTS,
+                            DebugTrackStore.filtered.size()
+                    );
+                }
+
+                DebugTrackStore.filteredCount = DebugTrackStore.filtered.size();
+
+                // =========================
+                // 🟢 SIMPLIFIED
+                // =========================
+                List<LatLng> simplifiedPoints =
+                        TrackSimplifier.simplify(filteredPoints, res.usedEpsilon);
+
+                DebugTrackStore.simplified.addAll(simplifiedPoints);
+
+                if (DebugTrackStore.simplified.size() > MAX_DEBUG_POINTS) {
+                    DebugTrackStore.simplified = DebugTrackStore.simplified.subList(
+                            DebugTrackStore.simplified.size() - MAX_DEBUG_POINTS,
+                            DebugTrackStore.simplified.size()
+                    );
+                }
+
+                DebugTrackStore.simplifiedCount = DebugTrackStore.simplified.size();
+
+                // =========================
+                // 📊 INFO
+                // =========================
+                DebugTrackStore.lastSms = res.encoded;
+                DebugTrackStore.smsLength = res.encoded.length();
+
+                DebugTrackStore.smsHistory.add(smsLen);
+
+                // =========================
+                // 📈 HISTORY LIMITATA
+                // =========================
+                DebugTrackStore.rawHistory.add(latLngPoints.size());
+                DebugTrackStore.filteredHistory.add(filteredPoints.size());
+                DebugTrackStore.simplifiedHistory.add(simplifiedPoints.size());
+                DebugTrackStore.timeHistory.add(now);
+
+                if (DebugTrackStore.rawHistory.size() > MAX_HISTORY) {
+                    DebugTrackStore.rawHistory.remove(0);
+                    DebugTrackStore.filteredHistory.remove(0);
+                    DebugTrackStore.simplifiedHistory.remove(0);
+                    DebugTrackStore.timeHistory.remove(0);
+                }
+            }
 
 
 
@@ -2811,15 +2993,15 @@ public class TxForegroundService extends Service {
             // ================================
             // 🚀 INVIO SEQUENZIALE
             // ================================
-            // 🔥 salva stato PRIMA
-            boolean wasFinalFlush = isFinalFlush;
+
+            // 🔥 stato reale flush
+            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
 
             // 🔥 invio
-            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
             sendSmsPartsSequentially(parts, isRealFinalFlush);
 
-            // 🔥 reset SOLO se era flush vero
-            if (wasFinalFlush) {
+            // 🔥 reset SOLO se flush reale
+            if (isRealFinalFlush) {
                 setFinalFlush(false, "processTrackBuffer RESET");
             }
 
@@ -2828,7 +3010,7 @@ public class TxForegroundService extends Service {
             // ================================
             // ♻️ ROLLING BUFFER (solo NON finale)
             // ================================
-            if (!wasFinalFlush) {
+            if (!isRealFinalFlush) {
 
                 synchronized (bufferLock) {
 
@@ -2853,7 +3035,7 @@ public class TxForegroundService extends Service {
             // ================================
             // 🛑 FINALE
             // ================================
-            if (wasFinalFlush) {
+            if (isRealFinalFlush) {
                 Log.d("TRACK", "FINAL FLUSH COMPLETED");
             }
 
@@ -2883,11 +3065,30 @@ public class TxForegroundService extends Service {
         return chunk;
     }
 
-    private void setFinalFlush(boolean value, String source) {
+    private void setFinalFlush(boolean value, String from) {
+
+        // 🚨 LOG SOLO QUANDO VIENE ATTIVATO
+        if (value) {
+            Log.e("FLUSH_ORIGIN",
+                    "🔥 setFinalFlush(TRUE) FROM=" + from +
+                            " | isRunning=" + isRunning +
+                            " | multiGps=" + multiGpsMode +
+                            " | finalStarted=" + finalFlushStarted.get() +
+                            " | thread=" + Thread.currentThread().getName(),
+                    new Exception());
+        }
+
+        if (value && !finalFlushStarted.get()) {
+            Log.e("STOP_BLOCK",
+                    "❌ FLUSH NON AUTORIZZATO FROM=" + from,
+                    new Exception());
+            return;
+        }
+
         isFinalFlush = value;
 
         Log.e("STOP_TRACE",
-                "isFinalFlush=" + value + " FROM=" + source,
+                "setFinalFlush(" + value + ") FROM=" + from,
                 new Exception());
     }
 
@@ -2905,21 +3106,12 @@ public class TxForegroundService extends Service {
     private void stopTrackingInternal() {
 
         Log.e("STOP_DEBUG", "stopTrackingInternal CALLED", new Exception());
-        Log.e("STOP_FLOW",
-                "stopTrackingInternal ENTRY",
-                new Exception());
 
-        // 👇 AGGIUNGI QUESTO SUBITO DOPO
-        Log.e("STOP_DEBUG", "isRunning=" + isRunning +
-                " finalSmsSent=" + finalSmsSent +
-                " isFinalFlush=" + isFinalFlush);
+        // 🔴 STOP COMPLETO TRACK HANDLER (FIX CRITICO)
+        trackHandler.removeCallbacksAndMessages(null);
+        trackRunnableScheduled = false;
 
-        setFinalFlush(true, "ACTION_STOP");
-        Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED");
-        processTrackBuffer();
-
-
-        trackHandler.removeCallbacks(trackProcessorRunnable);
+        // 🔴 PULIZIA BUFFER
         synchronized (bufferLock) {
             gpsTrackBuffer.clear();
         }
@@ -2930,20 +3122,29 @@ public class TxForegroundService extends Service {
         isRunning = false;
         Log.e("STOP_DEBUG", "isRunning → FALSE");
 
+        // 🔴 STOP GENERALE HANDLER
         handler.removeCallbacksAndMessages(null);
 
+        // 🔴 STOP RX MONITOR
         rxMonitorHandler.removeCallbacksAndMessages(null);
 
-        // ?? STOP SOLO IL TIMER UI SPECIFICO
+        // 🔴 STOP UI
         if (uiRunnable != null) {
             uiHandler.removeCallbacks(uiRunnable);
         }
+
+        // 🔴 STOP GPS
         if (continuousLocationCallback != null) {
             fusedClient.removeLocationUpdates(continuousLocationCallback);
             continuousLocationCallback = null;
         }
-        smsHandler.removeCallbacks(smsRunnable);
+
+        // 🔴 STOP SMS SCHEDULER
+        smsHandler.removeCallbacksAndMessages(null);
+
+        // 🔴 STATO
         sendUpdate(TxStatus.IDLE, 0, smsSent);
+
         stopForeground(true);
 
         sendUpdate(TxStatus.IDLE, 0, smsSent);
