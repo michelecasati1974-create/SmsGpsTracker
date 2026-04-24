@@ -48,6 +48,7 @@ import androidx.core.content.ContextCompat;
 
 
 
+
 public class TxForegroundService extends Service {
 
     public enum SignalLevel {
@@ -502,17 +503,6 @@ public class TxForegroundService extends Service {
 
         return parts;
     }
-
-    private int computeChunkSize(int totalParts) {
-
-        // es: "T10/10|" = ~7 char
-        int headerSize = 7;
-
-        int crcSize = 3; // |XX
-
-        return 150 - headerSize - crcSize;
-    }
-
 
 
 
@@ -2505,11 +2495,6 @@ public class TxForegroundService extends Service {
 
                 boolean isFinal = isRealFinalFlush && index == totalParts - 1;
 
-                // 🔥 evita D SOLO se flush reale
-                if (isRealFinalFlush && !isFinal) {
-                    Log.w("SEQ", "DROP → flush finale (solo F)");
-                    return;
-                }
 
                 String sms = parts.get(index);
 
@@ -2541,30 +2526,27 @@ public class TxForegroundService extends Service {
         Log.d("ADAPTIVE", "Applied new config");
     }
 
-    private String buildSafeSms(String encoded, int seq) {
 
-        String header = "TX|" + currentSessionId + "|" + seq + "|D|";
+    private double calculateAngle(LatLng a, LatLng b, LatLng c) {
 
-        String payload = header + encoded;
+        double abX = b.longitude - a.longitude;
+        double abY = b.latitude - a.latitude;
 
-        String full = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
+        double bcX = c.longitude - b.longitude;
+        double bcY = c.latitude - b.latitude;
 
-        // 🔥 HARD CUT ASSOLUTO
-        if (full.length() > 140) {
+        double dot = abX * bcX + abY * bcY;
 
-            int maxPayloadLen = 140
-                    - header.length()
-                    - 3; // CRC
+        double magAB = Math.sqrt(abX * abX + abY * abY);
+        double magBC = Math.sqrt(bcX * bcX + bcY * bcY);
 
-            if (encoded.length() > maxPayloadLen) {
-                encoded = encoded.substring(0, maxPayloadLen);
-            }
+        if (magAB == 0 || magBC == 0) return 180;
 
-            payload = header + encoded;
-            full = payload + "|" + SmsCrc.INSTANCE.crc8(payload);
-        }
+        double cosAngle = dot / (magAB * magBC);
 
-        return full;
+        cosAngle = Math.max(-1.0, Math.min(1.0, cosAngle));
+
+        return Math.toDegrees(Math.acos(cosAngle));
     }
 
     private void processTrackBuffer() {
@@ -2707,6 +2689,49 @@ public class TxForegroundService extends Service {
                              )
                          );
                         }
+
+                    // ================================
+                    // 🔥 CURVE PROTECTION (PRIMA DELLA COMPRESSIONE)
+                    // ================================
+                    if (latLngPoints.size() > 3) {
+
+                        List<LatLng> protectedPoints = new ArrayList<>();
+
+                        int step = Math.max(1, latLngPoints.size() / 150); // 🔥 base sampling
+
+                        for (int i = 0; i < latLngPoints.size(); i++) {
+
+                            // 🔹 sampling base (mantieni struttura)
+                            if (i % step == 0) {
+                                protectedPoints.add(latLngPoints.get(i));
+                                continue;
+                            }
+
+                            // 🔹 protezione curve
+                            if (i > 0 && i < latLngPoints.size() - 1) {
+
+                                LatLng prev = latLngPoints.get(i - 1);
+                                LatLng curr = latLngPoints.get(i);
+                                LatLng next = latLngPoints.get(i + 1);
+
+                                double angle = calculateAngle(prev, curr, next);
+
+                                if (angle < 150) { // 🔥 più selettivo
+                                    protectedPoints.add(curr);
+                                }
+                            }
+                        }
+
+                        latLngPoints = protectedPoints;
+
+                        Log.d("CURVE", "Protected points=" + latLngPoints.size());
+            }
+            if (latLngPoints.size() > 180) {
+                latLngPoints = latLngPoints.subList(
+                        latLngPoints.size() - 180,
+                        latLngPoints.size()
+                );
+            }
                     // ================================
                     // 🎯 PARAMETRI SMS (UNA SOLA VOLTA)
                     // ================================
@@ -2942,7 +2967,7 @@ public class TxForegroundService extends Service {
 
             Log.d("ADAPT", "FINAL len=" + res.encoded.length());
 
-            // ================================
+            /// ================================
             // 🚫 LIMITE SESSIONE
             // ================================
             if (smsSent >= maxSmsPerSession) {
@@ -2951,24 +2976,45 @@ public class TxForegroundService extends Service {
             }
 
             // ================================
-            // ✂️ SPLIT SMS (RIUSA VARIABILI)
+            // 🔥 STATO REALE FLUSH
             // ================================
-            String encoded = res.encoded;
-
-            // 🔥 chunk size calcolato UNA VOLTA
-            int chunkSize = maxSmsLen - headerLen - crcLen - safetyMargin;
+            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
 
             // ================================
-            // 🚀 COSTRUZIONE SMS CORRETTA
+            // 🔥 ENCODE COMPLETO (UNA SOLA VOLTA)
+            // ================================
+            String fullEncoded = Base64.encodeToString(
+                    res.encoded.getBytes(StandardCharsets.UTF_8),
+                    Base64.URL_SAFE | Base64.NO_WRAP
+            );
+
+            // ================================
+            // 🔥 CALCOLO DINAMICO CHUNK (STABILE)
+            // ================================
+            int realMaxPayload = maxSmsLen
+                    - headerLen
+                    - crcLen
+                    - 1;
+
+            // più conservativo = stabilità CRC
+            int chunkSize = Math.min(80, (int)(realMaxPayload * 0.7));
+
+            // ================================
+            // 🔥 SPLIT (FUORI DAL LOOP!)
+            // ================================
+            List<String> payloadParts = splitEncoded(fullEncoded, chunkSize);
+
+            // ================================
+            // 🚀 COSTRUZIONE SMS
             // ================================
             List<String> parts = new ArrayList<>();
 
-            List<String> rawParts = splitEncoded(res.encoded, chunkSize);
-
-            for (int i = 0; i < rawParts.size(); i++) {
+            for (int i = 0; i < payloadParts.size(); i++) {
 
                 int seq = nextSeq();
-                boolean isFinal = isFinalFlush && i == rawParts.size() - 1;
+
+                // 🔥 USA STATO REALE
+                boolean isFinal = isRealFinalFlush && i == payloadParts.size() - 1;
                 String type = isFinal ? "F" : "D";
 
                 String header = "TX|" +
@@ -2976,31 +3022,39 @@ public class TxForegroundService extends Service {
                         seq + "|" +
                         type + "|";
 
-                String payloadPart = rawParts.get(i);
+                String payloadPart = payloadParts.get(i);
 
                 String full = header + payloadPart;
 
-                String sms = full + "|" + SmsCrc.INSTANCE.crc8(full);
+                String crc = SmsCrc.INSTANCE.crc8(full);
 
+                String sms = full + "|" + crc;
+
+                // 🔴 HARD CHECK (NO RETRY DISTRUTTIVO)
                 if (sms.length() > 140) {
-                    sms = sms.substring(0, 140);
+
+                    Log.e("SMS_FATAL",
+                            "SMS troppo lungo → SCARTATO len=" + sms.length());
+
+                    continue; // 🔥 NON rifare loop!
                 }
+
+                Log.d("SMS_DEBUG",
+                        "SEQ=" + seq +
+                                " TYPE=" + type +
+                                " LEN=" + sms.length());
 
                 parts.add(sms);
             }
 
-
             // ================================
-            // 🚀 INVIO SEQUENZIALE
+            // 🚀 INVIO
             // ================================
-
-            // 🔥 stato reale flush
-            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
-
-            // 🔥 invio
             sendSmsPartsSequentially(parts, isRealFinalFlush);
 
-            // 🔥 reset SOLO se flush reale
+            // ================================
+            // 🔥 RESET SOLO SE F REALE
+            // ================================
             if (isRealFinalFlush) {
                 setFinalFlush(false, "processTrackBuffer RESET");
             }
@@ -3008,7 +3062,7 @@ public class TxForegroundService extends Service {
             lastTrackSmsTime = now;
 
             // ================================
-            // ♻️ ROLLING BUFFER (solo NON finale)
+            // ♻️ ROLLING BUFFER
             // ================================
             if (!isRealFinalFlush) {
 
@@ -3046,24 +3100,7 @@ public class TxForegroundService extends Service {
             }
         }
     }
-    private int computeChunkSizeSafe(int totalParts, int headerLen) {
 
-        int maxSmsLen = 135;
-        int crcLen = 3;
-        int safetyMargin = 10;
-
-        int chunk = maxSmsLen - headerLen - crcLen - safetyMargin;
-
-        // 🔥 protezione extra (mai troppo grande)
-        if (chunk > 120) chunk = 120;
-
-        // 🔥 protezione minima
-        if (chunk < 50) chunk = 50;
-
-        Log.d("SMS_DEBUG", "Chunk finale safe=" + chunk + " parts=" + totalParts);
-
-        return chunk;
-    }
 
     private void setFinalFlush(boolean value, String from) {
 
@@ -3180,16 +3217,6 @@ public class TxForegroundService extends Service {
         intent.putExtra("gpsFix", gpsFixValid);
 
         sendBroadcast(intent);
-    }
-
-    private Notification buildNotification() {
-
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("SmsGpsTracker attivo")
-                .setContentText("Invio GPS in corso")
-                .setSmallIcon(R.drawable.led_green)
-                .setOngoing(true)
-                .build();
     }
 
     private void createNotificationChannel() {

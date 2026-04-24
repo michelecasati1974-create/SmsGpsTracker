@@ -634,7 +634,56 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
             Log.d("SNAPSHOT_DEBUG", "saving bitmap")
 
-            // riduce uso memoria (fondamentale per Android 7)
+            if (trackPoints.isEmpty()) return
+
+            val last = trackPoints.last()
+
+            // ================================
+            // 📍 COMUNE (GEOCODER)
+            // ================================
+            var city = "UNKNOWN"
+
+            try {
+                val geocoder = Geocoder(this, Locale.ITALIAN)
+                val addresses = geocoder.getFromLocation(last.latitude, last.longitude, 1)
+
+                if (!addresses.isNullOrEmpty()) {
+                    city = addresses[0].locality ?: "UNKNOWN"
+                }
+
+            } catch (e: Exception) {
+                Log.e("SNAPSHOT_DEBUG", "Geocoder error", e)
+            }
+
+            // pulizia nome comune
+            city = city
+                .uppercase(Locale.ITALIAN)
+                .replace(" ", "")
+                .replace("[^A-Z]".toRegex(), "")
+
+            if (city == "UNKNOWN") {
+                city = "${"%.4f".format(last.latitude)}_${"%.4f".format(last.longitude)}"
+            }
+
+            // ================================
+            // 📅 DATA FORMATO ITALIANO
+            // ================================
+            val now = Date()
+
+            val day = SimpleDateFormat("dd", Locale.ITALIAN).format(now)
+            val month = SimpleDateFormat("MMMM", Locale.ITALIAN)
+                .format(now)
+                .uppercase(Locale.ITALIAN)
+
+            val year = SimpleDateFormat("yyyy", Locale.ITALIAN).format(now)
+
+            val fileName = "${day}${month}${year}${city}.jpg"
+
+            Log.d("SNAPSHOT_DEBUG", "filename=$fileName")
+
+            // ================================
+            // 🧠 RIDUZIONE MEMORIA
+            // ================================
             val scaled = Bitmap.createScaledBitmap(
                 bitmap,
                 bitmap.width / 2,
@@ -642,26 +691,38 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
                 true
             )
 
-            val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+            // ================================
+            // 📂 SALVATAGGIO MEDIASTORE (ANDROID 10+)
+            // ================================
+            val resolver = contentResolver
 
-            if (dir == null) {
-                Log.e("SNAPSHOT_DEBUG", "pictures dir null")
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SMSTracker")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+
+            val uri = resolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues
+            )
+
+            if (uri == null) {
+                Log.e("SNAPSHOT_DEBUG", "uri null")
                 return
             }
 
-            val file = File(
-                dir,
-                "track_${System.currentTimeMillis()}.jpg"
-            )
+            resolver.openOutputStream(uri)?.use { out ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
 
-            val out = FileOutputStream(file)
+            // 🔓 rendi visibile
+            contentValues.clear()
+            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, contentValues, null, null)
 
-            scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
-
-            out.flush()
-            out.close()
-
-            Log.d("SNAPSHOT_DEBUG", "bitmap saved: ${file.absolutePath}")
+            Log.d("SNAPSHOT_DEBUG", "SALVATO in GALLERIA: $fileName")
 
         } catch (e: Exception) {
 

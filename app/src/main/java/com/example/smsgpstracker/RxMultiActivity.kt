@@ -33,6 +33,8 @@ import com.example.smsgpstracker.rxmulti.RxMultiSmsParser
 import com.example.smsgpstracker.rxmulti.RxMultiTrackAssembler
 import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
 import com.example.smsgpstracker.rxmulti.RxMultiExtraRepository
+import com.example.smsgpstracker.rxmulti.RxPersistence
+import android.provider.MediaStore
 
 
 class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
@@ -80,6 +82,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             val type = intent?.getStringExtra("SMS_BODY") ?: return
             val raw = intent.getStringExtra("RAW_SMS")
 
+            Log.e("STEP1_RAW_SMS", "RAW: [$raw]")
+            Log.e("STEP1_BODY", "BODY: [$type]")
             Log.d("RX_DEBUG", "TYPE: [$type] RAW: [$raw]")
 
             // =====================================================
@@ -176,20 +180,47 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 try {
 
-                    val packet = multiParser.parse(type) ?: return
+                    val sms = type  // 🔥 usa SEMPRE questo
+
+                    val packet = multiParser.parse(sms) ?: run {
+                        Log.e("RX_FLOW", "PARSE FALLITO per sms=$sms")
+                        return
+                    }
+
+                    Log.e("RX_FLOW", "PARSE OK seq=${packet.seq}")
+
+                    if (packet == null) {
+                        Log.e("STEP2_PARSE_FAIL", "Parse FALLITO")
+                        return
+                    }
+
+                    Log.e("STEP2_PARSE_OK",
+                        "SESSION=${packet.sessionId} SEQ=${packet.seq} TYPE=${packet.type}")
 
                     // 🔥 AGGIORNA SESSIONE
                     multiAssembler.process(packet)
 
                     // 🔥 PRENDI SEMPRE TRACK COMPLETA (parziale o finale)
                     val partial = multiAssembler.getPartialTrack(packet.sessionId)
+                    // 💾 SALVATAGGIO PERSISTENTE
+                    RxPersistence.saveTrack(
+                        context!!,
+                        packet.sessionId,
+                        partial
+                    )
 
                     if (partial.isNotEmpty()) {
 
-                        trackPoints.clear()
+                        if (partial.isNotEmpty()) {
 
-                        partial.forEach {
-                            trackPoints.add(LatLng(it.first, it.second))
+                            val newPoints = partial.map { LatLng(it.first, it.second) }
+
+                            if (trackPoints.isEmpty()) {
+                                trackPoints.addAll(newPoints)
+                            } else {
+                                // append intelligente (evita duplicati)
+                                trackPoints.addAll(newPoints.drop(1))
+                            }
                         }
 
                         // 🔥🔥 AGGIUNGI QUESTO BLOCCO
@@ -204,12 +235,21 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                             else "RX ATTIVO"
                     }
 
-                    // 🔥 SNAPSHOT SOLO SE F
-                    if (packet.type == "F" && trackPoints.isNotEmpty()) {
+                    // 🔥 GESTIONE STATO
+                    if (packet.type == "F") {
 
-                        Handler(mainLooper).postDelayed({
-                            generateFinalSnapshot()
-                        }, 2000)
+                        Log.e("RX_FINAL", "F RICEVUTO")
+
+                        txtStatus.text = "Tracking completato"
+
+                        if (trackPoints.isNotEmpty()) {
+                            Handler(mainLooper).postDelayed({
+                                generateFinalSnapshot()
+                            }, 2000)
+                        }
+
+                    } else {
+                        txtStatus.text = "RX ATTIVO"
                     }
 
                 } catch (e: Exception) {
@@ -301,6 +341,21 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx_multi)
+        // ================================
+        // 🔥 RIPRISTINO TRACK DA DISCO
+        // ================================
+        val (savedSession, savedPoints) = RxPersistence.loadTrack(this)
+
+        if (savedPoints.isNotEmpty()) {
+
+            trackPoints.clear()
+            trackPoints.addAll(savedPoints.map { LatLng(it.first, it.second) })
+
+            RxMultiTrackRepository.points.clear()
+            RxMultiTrackRepository.points.addAll(savedPoints)
+
+            Log.d("RX_RESTORE", "Track ripristinato: ${savedPoints.size} punti")
+        }
         startEmergencyBlink()
 
         prefs = getSharedPreferences("map_settings", MODE_PRIVATE)
@@ -825,7 +880,56 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
             Log.d("SNAPSHOT_DEBUG", "saving bitmap")
 
-            // riduce uso memoria (fondamentale per Android 7)
+            if (trackPoints.isEmpty()) return
+
+            val last = trackPoints.last()
+
+            // ================================
+            // 📍 COMUNE (GEOCODER)
+            // ================================
+            var city = "UNKNOWN"
+
+            try {
+                val geocoder = Geocoder(this, Locale.ITALIAN)
+                val addresses = geocoder.getFromLocation(last.latitude, last.longitude, 1)
+
+                if (!addresses.isNullOrEmpty()) {
+                    city = addresses[0].locality ?: "UNKNOWN"
+                }
+
+            } catch (e: Exception) {
+                Log.e("SNAPSHOT_DEBUG", "Geocoder error", e)
+            }
+
+            // pulizia nome comune
+            city = city
+                .uppercase(Locale.ITALIAN)
+                .replace(" ", "")
+                .replace("[^A-Z]".toRegex(), "")
+
+            if (city == "UNKNOWN") {
+                city = "${"%.4f".format(last.latitude)}_${"%.4f".format(last.longitude)}"
+            }
+
+            // ================================
+            // 📅 DATA FORMATO ITALIANO
+            // ================================
+            val now = Date()
+
+            val day = SimpleDateFormat("dd", Locale.ITALIAN).format(now)
+            val month = SimpleDateFormat("MMMM", Locale.ITALIAN)
+                .format(now)
+                .uppercase(Locale.ITALIAN)
+
+            val year = SimpleDateFormat("yyyy", Locale.ITALIAN).format(now)
+
+            val fileName = "${day}${month}${year}${city}.jpg"
+
+            Log.d("SNAPSHOT_DEBUG", "filename=$fileName")
+
+            // ================================
+            // 🧠 RIDUZIONE MEMORIA
+            // ================================
             val scaled = Bitmap.createScaledBitmap(
                 bitmap,
                 bitmap.width / 2,
@@ -833,26 +937,38 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
                 true
             )
 
-            val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+            // ================================
+            // 📂 SALVATAGGIO MEDIASTORE (ANDROID 10+)
+            // ================================
+            val resolver = contentResolver
 
-            if (dir == null) {
-                Log.e("SNAPSHOT_DEBUG", "pictures dir null")
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SMSTracker")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+
+            val uri = resolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues
+            )
+
+            if (uri == null) {
+                Log.e("SNAPSHOT_DEBUG", "uri null")
                 return
             }
 
-            val file = File(
-                dir,
-                "track_${System.currentTimeMillis()}.jpg"
-            )
+            resolver.openOutputStream(uri)?.use { out ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
 
-            val out = FileOutputStream(file)
+            // 🔓 rendi visibile
+            contentValues.clear()
+            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, contentValues, null, null)
 
-            scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
-
-            out.flush()
-            out.close()
-
-            Log.d("SNAPSHOT_DEBUG", "bitmap saved: ${file.absolutePath}")
+            Log.d("SNAPSHOT_DEBUG", "SALVATO in GALLERIA: $fileName")
 
         } catch (e: Exception) {
 

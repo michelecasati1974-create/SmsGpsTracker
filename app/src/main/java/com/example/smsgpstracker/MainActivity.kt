@@ -43,6 +43,12 @@ class MainActivity : AppCompatActivity() {
         val btnTx = findViewById<Button>(R.id.btnTx)
         val btnRx = findViewById<Button>(R.id.btnRx)
         val btnRxMulti = findViewById<Button>(R.id.btnRxMulti)
+        val btnGallery = findViewById<Button>(R.id.btnGallery)
+
+        btnGallery.setOnClickListener {
+            val intent = Intent(this, RxGalleryActivity::class.java)
+            startActivity(intent)
+        }
 
         btnRxMulti.setOnClickListener {
             Toast.makeText(this, "RX MULTIGPS attivo", Toast.LENGTH_SHORT).show()
