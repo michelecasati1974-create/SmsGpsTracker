@@ -2,39 +2,36 @@ package com.example.smsgpstracker;
 
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.util.Log;
+import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
-import com.google.android.gms.maps.CameraUpdateFactory;
-import com.google.android.gms.maps.GoogleMap;
-import com.google.android.gms.maps.OnMapReadyCallback;
-import com.google.android.gms.maps.SupportMapFragment;
-import com.google.android.gms.maps.model.LatLng;
-import com.google.android.gms.maps.model.MarkerOptions;
-import com.google.android.gms.maps.model.PolylineOptions;
-import android.os.Handler;
-import android.widget.TextView;
-import android.util.Log;
 
-
-
-
+import com.google.android.gms.maps.*;
+import com.google.android.gms.maps.model.*;
 
 public class DebugTrackActivity extends AppCompatActivity
         implements OnMapReadyCallback {
+
     public static boolean isOpen = false;
+
     private GoogleMap map;
     private TextView statsView;
     private Handler handler = new Handler();
-    private boolean firstDraw = true;
+
     private boolean cameraMoved = false;
-    private DebugGraphView graphView;
     private boolean mapReady = false;
 
+    private DebugGraphView graphView;
 
+    // 🔥 FIX LEAK
+    private Polyline rawPolyline;
+    private Polyline filteredPolyline;
+    private Polyline simplifiedPolyline;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-
 
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_debug_track);
@@ -53,9 +50,6 @@ public class DebugTrackActivity extends AppCompatActivity
         if (mapFragment != null) {
             mapFragment.getMapAsync(this);
         }
-        if (graphView != null) {
-            graphView.invalidate();
-        }
     }
 
     private void startStatsUpdater() {
@@ -69,9 +63,9 @@ public class DebugTrackActivity extends AppCompatActivity
 
                 if (graphView != null) graphView.invalidate();
 
-                handler.postDelayed(this, 1000);
+                handler.postDelayed(this, 2000); // 🔥 meno stress CPU
             }
-        }, 1000);
+        }, 1500);
     }
 
     private void refreshMap() {
@@ -85,51 +79,78 @@ public class DebugTrackActivity extends AppCompatActivity
         map = googleMap;
         mapReady = true;
 
-        Log.d("DEBUG_TRACK", "Map READY → redraw");
+        Log.d("DEBUG_TRACK", "Map READY");
 
         redrawAll();
-        updateStats(); // 🔥 AGGIUNTA
+        updateStats();
     }
-
-
 
     private void redrawAll() {
 
         if (map == null) return;
 
-        map.clear();
-
+        // =========================
         // 🔴 RAW
+        // =========================
         if (DebugTrackStore.raw != null && DebugTrackStore.raw.size() > 1) {
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.raw)
-                            .color(Color.RED)
-                            .width(4)
-            );
+
+            if (rawPolyline == null) {
+                rawPolyline = map.addPolyline(
+                        new PolylineOptions()
+                                .addAll(limit(DebugTrackStore.raw))
+                                .color(Color.RED)
+                                .width(4)
+                );
+            } else {
+                rawPolyline.setPoints(limit(DebugTrackStore.raw));
+            }
         }
 
-        // 🟡 FILTERED (AGGIUNTA!)
+        // =========================
+        // 🟡 FILTERED
+        // =========================
         if (DebugTrackStore.filtered != null && DebugTrackStore.filtered.size() > 1) {
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.filtered)
-                            .color(Color.YELLOW)
-                            .width(5)
-            );
+
+            if (filteredPolyline == null) {
+                filteredPolyline = map.addPolyline(
+                        new PolylineOptions()
+                                .addAll(limit(DebugTrackStore.filtered))
+                                .color(Color.YELLOW)
+                                .width(5)
+                );
+            } else {
+                filteredPolyline.setPoints(limit(DebugTrackStore.filtered));
+            }
         }
 
+        // =========================
         // 🟢 SIMPLIFIED
+        // =========================
         if (DebugTrackStore.simplified != null && DebugTrackStore.simplified.size() > 1) {
-            map.addPolyline(
-                    new PolylineOptions()
-                            .addAll(DebugTrackStore.simplified)
-                            .color(Color.GREEN)
-                            .width(6)
-            );
+
+            if (simplifiedPolyline == null) {
+                simplifiedPolyline = map.addPolyline(
+                        new PolylineOptions()
+                                .addAll(limit(DebugTrackStore.simplified))
+                                .color(Color.GREEN)
+                                .width(6)
+                );
+            } else {
+                simplifiedPolyline.setPoints(limit(DebugTrackStore.simplified));
+            }
         }
 
         moveCamera();
+    }
+
+    // 🔥 LIMIT ANTI-OOM
+    private java.util.List<LatLng> limit(java.util.List<LatLng> input) {
+
+        int max = 120;
+
+        if (input.size() <= max) return input;
+
+        return input.subList(input.size() - max, input.size());
     }
 
     private void updateStats() {
@@ -138,14 +159,12 @@ public class DebugTrackActivity extends AppCompatActivity
                 "RAW: " + DebugTrackStore.rawCount + "\n" +
                         "FILTER: " + DebugTrackStore.filteredCount + "\n" +
                         "SIMPL: " + DebugTrackStore.simplifiedCount + "\n" +
-                        "SMS LEN: " + DebugTrackStore.smsLength + "\n" +
-                        "SMS: " + DebugTrackStore.lastSms;
+                        "SMS LEN: " + DebugTrackStore.smsLength;
 
         if (statsView != null) {
             statsView.setText(text);
         }
     }
-
 
     private void moveCamera() {
 
@@ -164,9 +183,13 @@ public class DebugTrackActivity extends AppCompatActivity
     protected void onDestroy() {
         super.onDestroy();
         isOpen = false;
+        handler.removeCallbacksAndMessages(null);
+
+        // 🔥 CLEANUP
+        if (rawPolyline != null) rawPolyline.remove();
+        if (filteredPolyline != null) filteredPolyline.remove();
+        if (simplifiedPolyline != null) simplifiedPolyline.remove();
     }
-
 }
-
 
 

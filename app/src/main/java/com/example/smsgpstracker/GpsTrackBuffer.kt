@@ -2,6 +2,7 @@ package com.example.smsgpstracker
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -14,45 +15,51 @@ data class GpsPoint(
 
 class GpsTrackBuffer(context: Context) {
 
-    // 🔴 ORA È INTERNO ALLA CLASSE (non più globale!)
     private val memoryBuffer = mutableListOf<GpsPoint>()
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("TRACK_BUFFER", Context.MODE_PRIVATE)
 
     private val KEY_BUFFER = "gps_buffer"
-    private val MAX_POINTS = 5000
+
+    // 🔥 HARD LIMIT RIDOTTO (evita OOM)
+    private val MAX_POINTS = 1000
+
+    // 🔥 controllo salvataggio
+    private var saveCounter = 0
 
     // ================================
-    // ADD POINT (THREAD SAFE)
+    // ADD POINT (SAFE)
     // ================================
     @Synchronized
     fun addPoint(point: GpsPoint) {
 
         memoryBuffer.add(point)
 
+        // 🔴 HARD LIMIT
         if (memoryBuffer.size > MAX_POINTS) {
             memoryBuffer.removeAt(0)
         }
 
-        // salvataggio asincrono ogni 10 punti
-        if (memoryBuffer.size % 10 == 0) {
-            saveToPrefs()
+        saveCounter++
+
+        // ✅ salva ogni 20 punti (NON ogni volta)
+        if (saveCounter >= 20) {
+            saveToPrefsSafe()
+            saveCounter = 0
         }
     }
 
     // ================================
-    // GET COPY (🔴 SICURO)
+    // GET COPY
     // ================================
     @Synchronized
     fun getPointsCopy(): List<GpsPoint> {
 
-        // se già in memoria → copia
         if (memoryBuffer.isNotEmpty()) {
             return ArrayList(memoryBuffer)
         }
 
-        // altrimenti carica da prefs
         val array = getArray()
 
         memoryBuffer.clear()
@@ -75,33 +82,48 @@ class GpsTrackBuffer(context: Context) {
     }
 
     // ================================
-    // CLEAR (🔴 FIX CRITICO)
+    // CLEAR
     // ================================
     @Synchronized
     fun clear() {
-
-        memoryBuffer.clear() // 🔥 PRIMA MANCAVA!
-
+        memoryBuffer.clear()
         prefs.edit().remove(KEY_BUFFER).apply()
     }
 
     // ================================
-    // COUNT (SAFE)
+    // COUNT
     // ================================
     @Synchronized
-    fun count(): Int {
-        return memoryBuffer.size
+    fun count(): Int = memoryBuffer.size
+
+    // ================================
+    // 🔥 SAVE SAFE (LIMITATO)
+    // ================================
+    private fun saveToPrefsSafe() {
+
+        val maxSave = 100 // 🔥 salva solo ultimi 100
+
+        val limited = if (memoryBuffer.size > maxSave) {
+            memoryBuffer.takeLast(maxSave)
+        } else {
+            memoryBuffer
+        }
+
+        try {
+            saveToPrefsInternal(limited)
+        } catch (e: Exception) {
+            Log.e("GPS_BUFFER", "Errore save SAFE", e)
+        }
     }
 
     // ================================
-    // SAVE
+    // SAVE INTERNAL
     // ================================
-    private fun saveToPrefs() {
+    private fun saveToPrefsInternal(data: List<GpsPoint>) {
 
         val array = JSONArray()
 
-        for (p in memoryBuffer) {
-
+        for (p in data) {
             val obj = JSONObject()
 
             obj.put("t", p.timestamp)
@@ -112,20 +134,13 @@ class GpsTrackBuffer(context: Context) {
             array.put(obj)
         }
 
-        saveArray(array)
-    }
-
-    private fun getArray(): JSONArray {
-
-        val str = prefs.getString(KEY_BUFFER, "[]") ?: "[]"
-
-        return JSONArray(str)
-    }
-
-    private fun saveArray(array: JSONArray) {
-
         prefs.edit()
             .putString(KEY_BUFFER, array.toString())
             .apply()
+    }
+
+    private fun getArray(): JSONArray {
+        val str = prefs.getString(KEY_BUFFER, "[]") ?: "[]"
+        return JSONArray(str)
     }
 }

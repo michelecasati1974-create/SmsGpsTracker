@@ -35,6 +35,10 @@ import com.example.smsgpstracker.rxmulti.RxMultiTrackRepository
 import com.example.smsgpstracker.rxmulti.RxMultiExtraRepository
 import com.example.smsgpstracker.rxmulti.RxPersistence
 import android.provider.MediaStore
+import android.net.Uri
+import java.io.OutputStream
+import android.content.ContentValues
+
 
 
 class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
@@ -43,26 +47,17 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
     private lateinit var googleMap: GoogleMap
-
     private var mapReady = false
     private var receiverRegistered = false
-
     private val trackPoints = mutableListOf<LatLng>()
-
     private var trackPolyline: Polyline? = null
     private var lastMarker: Marker? = null
-
     private var cycloOverlay: TileOverlay? = null
     private var isCycloEnabled = false
-
     private lateinit var prefs: SharedPreferences
     private var selectedMapProvider = "GOOGLE"   // GOOGLE o MAPTILER
-
     private val manualPoints = mutableListOf<LatLng>()
-
-
     private val multiParser = RxMultiSmsParser()
-
     private val multiAssembler = RxMultiTrackAssembler()
     private val emergencyPoints = mutableListOf<LatLng>()
     private var emergencyBlink = false
@@ -180,65 +175,76 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 try {
 
-                    val sms = type  // 🔥 usa SEMPRE questo
+                    val sms = type
 
                     val packet = multiParser.parse(sms) ?: run {
                         Log.e("RX_FLOW", "PARSE FALLITO per sms=$sms")
                         return
                     }
 
-                    Log.e("RX_FLOW", "PARSE OK seq=${packet.seq}")
+                    Log.e("RX_FLOW", "PARSE OK seq=${packet.seq}/${packet.total} type=${packet.type}")
 
-                    if (packet == null) {
-                        Log.e("STEP2_PARSE_FAIL", "Parse FALLITO")
-                        return
+                    // =========================
+                    // 🆕 GESTIONE SESSIONE
+                    // =========================
+                    val previousSession = RxMultiTrackRepository.currentSessionId
+
+                    if (previousSession != packet.sessionId) {
+
+                        Log.e("RX_SESSION", "NUOVA SESSIONE → RESET UI")
+
+                        trackPoints.clear()
+                        RxMultiTrackRepository.points.clear()
+
+                        multiAssembler.reset()
+
+                        firstCameraMove = true
                     }
 
-                    Log.e("STEP2_PARSE_OK",
-                        "SESSION=${packet.sessionId} SEQ=${packet.seq} TYPE=${packet.type}")
+                    RxMultiTrackRepository.currentSessionId = packet.sessionId
 
-                    // 🔥 AGGIORNA SESSIONE
+                    // =========================
+                    // 🔥 PROCESSA PACKET
+                    // =========================
                     multiAssembler.process(packet)
 
-                    // 🔥 PRENDI SEMPRE TRACK COMPLETA (parziale o finale)
-                    val partial = multiAssembler.getPartialTrack(packet.sessionId)
-                    // 💾 SALVATAGGIO PERSISTENTE
-                    RxPersistence.saveTrack(
-                        context!!,
-                        packet.sessionId,
-                        partial
-                    )
+                    // =========================
+                    // 🔁 TRACK CUMULATIVO REALE
+                    // =========================
+                    val cumulative = multiAssembler.getFullTrack()
 
-                    if (partial.isNotEmpty()) {
+                    if (cumulative.isNotEmpty()) {
 
-                        if (partial.isNotEmpty()) {
-
-                            val newPoints = partial.map { LatLng(it.first, it.second) }
-
-                            if (trackPoints.isEmpty()) {
-                                trackPoints.addAll(newPoints)
-                            } else {
-                                // append intelligente (evita duplicati)
-                                trackPoints.addAll(newPoints.drop(1))
-                            }
-                        }
-
-                        // 🔥🔥 AGGIUNGI QUESTO BLOCCO
+                        // 🔥 SALVATAGGIO PERSISTENTE (FONDAMENTALE)
                         RxMultiTrackRepository.points.clear()
-                        RxMultiTrackRepository.points.addAll(partial)
-                        // 🔥🔥 FINE FIX
+                        RxMultiTrackRepository.points.addAll(cumulative)
+
+                        // 🔥 UI
+                        trackPoints.clear()
+                        trackPoints.addAll(cumulative.map { LatLng(it.first, it.second) })
 
                         if (mapReady) drawAllPoints()
-
-                        txtStatus.text =
-                            if (packet.type == "F") "Tracking completato"
-                            else "RX ATTIVO"
                     }
 
-                    // 🔥 GESTIONE STATO
+                    // =========================
+                    // 🏁 CHIUSURA SU F (ROBUSTA)
+                    // =========================
                     if (packet.type == "F") {
 
-                        Log.e("RX_FINAL", "F RICEVUTO")
+                        Log.e("RX_FINAL", "F RICEVUTO → chiusura tracking")
+
+                        val finalTrack = multiAssembler.buildFinalTrack()
+
+                        if (finalTrack != null && finalTrack.isNotEmpty()) {
+
+                            RxMultiTrackRepository.points.clear()
+                            RxMultiTrackRepository.points.addAll(finalTrack)
+
+                            trackPoints.clear()
+                            trackPoints.addAll(finalTrack.map { LatLng(it.first, it.second) })
+
+                            if (mapReady) drawAllPoints()
+                        }
 
                         txtStatus.text = "Tracking completato"
 
@@ -248,8 +254,12 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                             }, 2000)
                         }
 
-                    } else {
-                        txtStatus.text = "RX ATTIVO"
+                        // 🔴 RESET DOPO SNAPSHOT (NON SUBITO!)
+                        Handler(mainLooper).postDelayed({
+                            multiAssembler.reset()
+                        }, 4000)
+
+                        return
                     }
 
                 } catch (e: Exception) {
@@ -310,30 +320,6 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-
-    private fun handleEmergency(point: LatLng) {
-
-        // 1. Marker rosso
-        googleMap.addMarker(
-            MarkerOptions()
-                .position(point)
-                .title("SOS")
-                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-        )
-
-        // 2. Alert utente
-        runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle("🚨 EMERGENCY")
-                .setMessage("Posizione ricevuta:\n${point.latitude}, ${point.longitude}")
-                .setPositiveButton("OK", null)
-                .show()
-        }
-
-        // 3. Log
-        Log.d("RX_MULTI", "EMERGENCY at ${point.latitude}, ${point.longitude}")
-    }
-
     // =====================================================
     // ON CREATE
     // =====================================================
@@ -341,42 +327,91 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rx_multi)
+
         // ================================
-        // 🔥 RIPRISTINO TRACK DA DISCO
+        // 🔥 RESET SOLO AL PRIMO AVVIO
+        // ================================
+        if (savedInstanceState == null) {
+
+            Log.e("RX_INIT", "FIRST START → RESET COMPLETO")
+
+            trackPoints.clear()
+            RxMultiTrackRepository.points.clear()
+            RxMultiTrackRepository.currentSessionId = null
+            multiAssembler.reset()
+
+        } else {
+
+            Log.e("RX_INIT", "RECREATE (ROTATION) → MANTENGO DATI")
+
+            // 🔁 RIPRISTINO DA REPOSITORY (già in memoria)
+            trackPoints.clear()
+
+            RxMultiTrackRepository.points.forEach {
+                trackPoints.add(LatLng(it.first, it.second))
+            }
+        }
+
+        // ================================
+        // 🔥 RIPRISTINO TRACK (DISABILITATO)
         // ================================
         val (savedSession, savedPoints) = RxPersistence.loadTrack(this)
 
-        if (savedPoints.isNotEmpty()) {
+        val restoreEnabled = false // puoi riattivarlo dopo stabilizzazione
 
-            trackPoints.clear()
+        if (restoreEnabled && savedPoints.isNotEmpty()) {
+
             trackPoints.addAll(savedPoints.map { LatLng(it.first, it.second) })
 
-            RxMultiTrackRepository.points.clear()
             RxMultiTrackRepository.points.addAll(savedPoints)
+            RxMultiTrackRepository.currentSessionId = savedSession
 
             Log.d("RX_RESTORE", "Track ripristinato: ${savedPoints.size} punti")
         }
+
+        // ================================
+        // 🚨 EMERGENCY BLINK
+        // ================================
         startEmergencyBlink()
 
+        // ================================
+        // ⚙️ SETTINGS MAPPA
+        // ================================
         prefs = getSharedPreferences("map_settings", MODE_PRIVATE)
-        selectedMapProvider = prefs.getString("provider", "GOOGLE")!!
+        selectedMapProvider = prefs.getString("provider", "GOOGLE") ?: "GOOGLE"
 
+        // ================================
+        // UI
+        // ================================
         txtStatus = findViewById(R.id.txtStatus)
         txtCount = findViewById(R.id.txtCount)
         txtLast = findViewById(R.id.txtLast)
 
+        txtStatus.text = "RX ATTIVO"
+
+        // ================================
+        // MAP
+        // ================================
         val mapFragment = supportFragmentManager
             .findFragmentById(R.id.map) as SupportMapFragment
         mapFragment.getMapAsync(this)
 
+        // ================================
+        // 📡 REGISTER RECEIVER
+        // ================================
         val filter = IntentFilter(SmsCommandProcessor.ACTION_SMS_EVENT)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(smsReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(smsReceiver, filter)
         }
+
         receiverRegistered = true
 
+        // ================================
+        // 🗺️ SWITCH MAP PROVIDER
+        // ================================
         val switchMapType = findViewById<Switch>(R.id.switchMapType)
 
         switchMapType.isChecked = selectedMapProvider == "MAPTILER"
@@ -391,9 +426,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
         // ================================
-        // BLOCCO CONFERMA BACK (RX MODE)
+        // 🔙 BACK CONFIRM
         // ================================
-
         onBackPressedDispatcher.addCallback(this) {
 
             AlertDialog.Builder(this@RxMultiActivity)
@@ -473,7 +507,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             trackPolyline = googleMap.addPolyline(
                 PolylineOptions()
                     .addAll(trackPoints)
-                    .width(6f)
+                    .width(4f)
                     .color(Color.BLACK)
             )
         } else {
@@ -627,13 +661,42 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         }, 1500)
     }
 
-    private fun generateFinalSnapshot() {
+    private fun takeSnapshotWithRetry(attempt: Int) {
 
+        googleMap.snapshot { bitmap ->
+
+            if (bitmap == null) {
+
+                if (attempt < 3) {
+
+                    Handler(Looper.getMainLooper()).postDelayed({
+
+                        takeSnapshotWithRetry(attempt + 1)
+
+                    }, 1500)
+
+                } else {
+
+                    Log.e("SNAPSHOT", "Snapshot fallita")
+                }
+
+                return@snapshot
+            }
+
+            takeSnapshot()
+        }
+    }
+
+    private fun generateFinalSnapshot() {
 
         if (!mapReady || trackPoints.isEmpty()) return
 
         val builder = LatLngBounds.Builder()
+
         trackPoints.forEach { builder.include(it) }
+        manualPoints.forEach { builder.include(it) }
+        emergencyPoints.forEach { builder.include(it) }
+
         val bounds = builder.build()
 
         googleMap.animateCamera(
@@ -643,10 +706,23 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 override fun onFinish() {
 
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        takeSnapshotSafely()
-                    }, 2000) // più tempo per MapTiler
+                    googleMap.setOnMapLoadedCallback {
 
+                        Log.d("SNAPSHOT", "MAP LOADED")
+
+                        // 🔥 WAIT DINAMICO
+                        val extraDelay =
+                            if (selectedMapProvider == "MAPTILER")
+                                3500L
+                            else
+                                800L
+
+                        Handler(Looper.getMainLooper()).postDelayed({
+
+                            takeSnapshotWithRetry(0)
+
+                        }, extraDelay)
+                    }
                 }
 
                 override fun onCancel() {
@@ -655,6 +731,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         )
     }
+
+
 
     private fun takeSnapshot() {
 
@@ -733,7 +811,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     else -> {
 
                         paintCircle.color = Color.BLACK
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 12f, paintCircle)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 9f, paintCircle)
 
                         // etichetta ogni 5 punti
                         if (index % 5 == 0) {
@@ -818,19 +896,6 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    private fun isNearManualPoint(latLng: LatLng): Boolean {
-
-        return manualPoints.any { manual ->
-
-            val dLat = latLng.latitude - manual.latitude
-            val dLon = latLng.longitude - manual.longitude
-
-            val distance = Math.sqrt(dLat * dLat + dLon * dLon)
-
-            distance < 0.0005   // ~50 metri
-        }
-    }
-
     private fun drawInfoOverlay(canvas: Canvas, bitmap: Bitmap) {
 
         val last = trackPoints.last()
@@ -874,62 +939,31 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
             y += 28f
         }
     }
+    private fun generateFileName(lat: Double?, lon: Double?): String {
+
+        val date = java.text.SimpleDateFormat("ddMMMM yyyy", java.util.Locale.ITALIAN)
+            .format(java.util.Date())
+            .uppercase()
+
+        val location = try {
+            if (lat != null && lon != null) {
+                val geocoder = android.location.Geocoder(this, java.util.Locale.ITALIAN)
+                val list = geocoder.getFromLocation(lat, lon, 1)
+
+                if (!list.isNullOrEmpty()) {
+                    list[0].locality ?: "UNKNOWN"
+                } else "UNKNOWN"
+            } else "UNKNOWN"
+        } catch (e: Exception) {
+            "UNKNOWN"
+        }
+
+        return "${date.replace(" ", "")}${location.uppercase()}.jpg"
+    }
     private fun saveFinalBitmap(bitmap: Bitmap) {
 
         try {
 
-            Log.d("SNAPSHOT_DEBUG", "saving bitmap")
-
-            if (trackPoints.isEmpty()) return
-
-            val last = trackPoints.last()
-
-            // ================================
-            // 📍 COMUNE (GEOCODER)
-            // ================================
-            var city = "UNKNOWN"
-
-            try {
-                val geocoder = Geocoder(this, Locale.ITALIAN)
-                val addresses = geocoder.getFromLocation(last.latitude, last.longitude, 1)
-
-                if (!addresses.isNullOrEmpty()) {
-                    city = addresses[0].locality ?: "UNKNOWN"
-                }
-
-            } catch (e: Exception) {
-                Log.e("SNAPSHOT_DEBUG", "Geocoder error", e)
-            }
-
-            // pulizia nome comune
-            city = city
-                .uppercase(Locale.ITALIAN)
-                .replace(" ", "")
-                .replace("[^A-Z]".toRegex(), "")
-
-            if (city == "UNKNOWN") {
-                city = "${"%.4f".format(last.latitude)}_${"%.4f".format(last.longitude)}"
-            }
-
-            // ================================
-            // 📅 DATA FORMATO ITALIANO
-            // ================================
-            val now = Date()
-
-            val day = SimpleDateFormat("dd", Locale.ITALIAN).format(now)
-            val month = SimpleDateFormat("MMMM", Locale.ITALIAN)
-                .format(now)
-                .uppercase(Locale.ITALIAN)
-
-            val year = SimpleDateFormat("yyyy", Locale.ITALIAN).format(now)
-
-            val fileName = "${day}${month}${year}${city}.jpg"
-
-            Log.d("SNAPSHOT_DEBUG", "filename=$fileName")
-
-            // ================================
-            // 🧠 RIDUZIONE MEMORIA
-            // ================================
             val scaled = Bitmap.createScaledBitmap(
                 bitmap,
                 bitmap.width / 2,
@@ -937,43 +971,57 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
                 true
             )
 
-            // ================================
-            // 📂 SALVATAGGIO MEDIASTORE (ANDROID 10+)
-            // ================================
-            val resolver = contentResolver
+            // 🔥 PRENDI ULTIMA POSIZIONE
+            val lastPoint = trackPoints.lastOrNull()
+            val lat = lastPoint?.latitude
+            val lon = lastPoint?.longitude
 
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SMSTracker")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
+            val filename = generateFileName(lat, lon)
+
+            val outputStream: OutputStream?
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+                val resolver = contentResolver
+
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/SMSTracker")
+                }
+
+                val imageUri = resolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    contentValues
+                )
+
+                outputStream = imageUri?.let { resolver.openOutputStream(it) }
+
+            } else {
+
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "SMSTracker"
+                )
+
+                if (!dir.exists()) dir.mkdirs()
+
+                val file = File(dir, filename)
+                outputStream = FileOutputStream(file)
+
+                sendBroadcast(
+                    Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(file))
+                )
             }
 
-            val uri = resolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-
-            if (uri == null) {
-                Log.e("SNAPSHOT_DEBUG", "uri null")
-                return
+            outputStream?.use {
+                scaled.compress(Bitmap.CompressFormat.JPEG, 90, it)
             }
 
-            resolver.openOutputStream(uri)?.use { out ->
-                scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
-            }
-
-            // 🔓 rendi visibile
-            contentValues.clear()
-            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, contentValues, null, null)
-
-            Log.d("SNAPSHOT_DEBUG", "SALVATO in GALLERIA: $fileName")
+            Log.d("SNAPSHOT", "SALVATO OK: $filename")
 
         } catch (e: Exception) {
-
-            Log.e("SNAPSHOT_DEBUG", "save error", e)
-
+            Log.e("SNAPSHOT", "ERRORE SALVATAGGIO", e)
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.example.smsgpstracker
 
 import android.content.ContentUris
+import android.content.Intent
 import android.os.Bundle
 import android.provider.MediaStore
 import android.widget.ImageView
@@ -8,6 +9,10 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import android.os.Build
+import java.io.File
+import android.os.Environment
+
 
 class RxGalleryActivity : AppCompatActivity() {
 
@@ -19,7 +24,12 @@ class RxGalleryActivity : AppCompatActivity() {
         setContentView(R.layout.activity_gallery)
 
         recyclerView = findViewById(R.id.recyclerView)
-        recyclerView.layoutManager = GridLayoutManager(this, 3)
+
+        recyclerView.layoutManager = GridLayoutManager(this, 2)
+
+        recyclerView.setHasFixedSize(true)
+        recyclerView.itemAnimator = null
+        recyclerView.setItemViewCacheSize(20)
 
         loadImages()
 
@@ -28,36 +38,59 @@ class RxGalleryActivity : AppCompatActivity() {
 
     private fun loadImages() {
 
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DISPLAY_NAME
-        )
+        imageList.clear()
 
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("%Pictures/SMSTracker%")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 
-        val cursor = contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            "${MediaStore.Images.Media.DATE_ADDED} DESC"
-        )
+            // ✅ Android moderno
+            val projection = arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME
+            )
 
-        cursor?.use {
-            val idColumn = it.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-            val nameColumn = it.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+            val selectionArgs = arrayOf("%Pictures/SMSTracker%")
 
-            while (it.moveToNext()) {
-                val id = it.getLong(idColumn)
-                val name = it.getString(nameColumn)
+            val cursor = contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                "${MediaStore.Images.Media.DATE_ADDED} DESC"
+            )
 
-                val uri = ContentUris.withAppendedId(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    id
-                )
+            cursor?.use {
+                val idColumn = it.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val nameColumn = it.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
 
-                imageList.add(ImageItem(uri.toString(), name))
+                while (it.moveToNext()) {
+                    val id = it.getLong(idColumn)
+                    val name = it.getString(nameColumn)
+
+                    val uri = ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+
+                    imageList.add(ImageItem(uri.toString(), name))
+                }
+            }
+
+        } else {
+
+            // 🔥 Android 7 fallback
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "SMSTracker"
+            )
+
+            if (dir.exists()) {
+
+                val files = dir.listFiles()
+
+                files?.sortedByDescending { it.lastModified() }?.forEach { file ->
+                    imageList.add(ImageItem(file.toURI().toString(), file.name))
+                }
             }
         }
     }
@@ -95,6 +128,15 @@ class GalleryAdapter(private val items: List<ImageItem>) :
 
         val uri = android.net.Uri.parse(item.uri)
         holder.image.setImageURI(uri)
+        holder.itemView.setOnClickListener {
+
+            val context = holder.itemView.context
+            val intent = Intent(context, ImageViewerActivity::class.java)
+
+            intent.putExtra("image_uri", item.uri)
+
+            context.startActivity(intent)
+        }
     }
 
     override fun getItemCount(): Int = items.size

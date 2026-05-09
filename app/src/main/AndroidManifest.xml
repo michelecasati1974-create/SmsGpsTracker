@@ -102,6 +102,8 @@
 
         <activity android:name=".RxGalleryActivity"/>
 
+        <activity android:name=".ImageViewerActivity" />
+
         <!-- ===== SMS RECEIVER ===== -->
         <receiver
             android:name=".SmsReceiver"

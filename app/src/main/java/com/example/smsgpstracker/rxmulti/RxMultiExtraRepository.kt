@@ -7,3 +7,4 @@ object RxMultiExtraRepository {
     val manual = mutableListOf<LatLng>()
     val emergency = mutableListOf<LatLng>()
 }
+

@@ -1,182 +1,185 @@
 package com.example.smsgpstracker.rxmulti
 
+import android.util.Base64
 import android.util.Log
 import com.example.smsgpstracker.tx.PolylineCodec
 
 class RxMultiTrackAssembler {
 
     data class SessionBuffer(
-        val packets: MutableMap<Int, RxMultiSmsPacket> = mutableMapOf(),
-        var isFinalReceived: Boolean = false,
-        var lastUpdate: Long = System.currentTimeMillis()
+
+        // seq ricevuti
+        val receivedSeq: MutableSet<Int> = mutableSetOf(),
+
+        // track completo
+        val fullTrack: MutableList<Pair<Double, Double>> = mutableListOf(),
+
+        // ultimo punto
+        var lastPoint: Pair<Double, Double>? = null,
+
+        // finale ricevuto
+        var finalReceived: Boolean = false,
+
     )
 
     private val sessions = mutableMapOf<String, SessionBuffer>()
 
-    fun process(packet: RxMultiSmsPacket): List<Pair<Double, Double>> {
+    private var currentSessionId: String? = null
 
-        Log.e("ASM_IN",
-            "SESSION=${packet.sessionId} SEQ=${packet.seq} TYPE=${packet.type}"
-        )
+    // =====================================================
+    // PROCESS
+    // =====================================================
+    fun process(packet: RxMultiSmsPacket) {
 
-        val session = sessions.getOrPut(packet.sessionId) {
-            Log.e("ASM_NEW_SESSION", "Nuova sessione ${packet.sessionId}")
+        val sessionId = packet.sessionId
+
+        // =========================================
+        // NUOVA SESSIONE
+        // =========================================
+        if (currentSessionId != sessionId) {
+
+            Log.e("ASM_SESSION", "NEW SESSION RESET")
+
+            sessions.clear()
+
+            currentSessionId = sessionId
+        }
+
+        val session = sessions.getOrPut(sessionId) {
             SessionBuffer()
         }
 
-        session.lastUpdate = System.currentTimeMillis()
+        // =========================================
+        // DUPLICATI
+        // =========================================
+        if (session.receivedSeq.contains(packet.seq)) {
 
-        // anti duplicati
-        if (!session.packets.containsKey(packet.seq)) {
-            session.packets[packet.seq] = packet
-        } else {
-            Log.e("ASM_DUPLICATE", "SEQ duplicato ${packet.seq}")
+            Log.d("ASM_DUP", "SEQ ${packet.seq} ignorato")
+
+            return
         }
 
-        Log.e("ASM_BUFFER",
-            "BUFFER SIZE=${session.packets.size} KEYS=${session.packets.keys}"
-        )
+        session.receivedSeq.add(packet.seq)
 
-        // =========================
-        // 📡 REALTIME
-        // =========================
-        val decodedNow = try {
-            val pts = PolylineCodec.decode(packet.payload)
-            Log.e("ASM_DECODE_NOW", "SEQ=${packet.seq} POINTS=${pts.size}")
-            pts
+        // =========================================
+        // DECODE SINGOLO SMS
+        // =========================================
+        try {
+
+            val bytes = Base64.decode(
+                packet.payloadChunk,
+                Base64.URL_SAFE or Base64.NO_WRAP
+            )
+
+            val decoded =
+                String(bytes, Charsets.UTF_8)
+
+            val points =
+                PolylineCodec.decode(decoded)
+
+            appendPoints(session, points)
+
+            Log.e(
+                "ASM_APPEND",
+                "seq=${packet.seq} points=${points.size} total=${session.fullTrack.size}"
+            )
+
         } catch (e: Exception) {
-            Log.e("ASM_DECODE_FAIL", "Errore decode seq=${packet.seq}", e)
-            emptyList()
+
+            Log.e(
+                "ASM_DECODE",
+                "DECODE FAILED seq=${packet.seq}",
+                e
+            )
         }
 
-        // =========================
-        // 🏁 FINALE
-        // =========================
+        // =========================================
+        // FINAL
+        // =========================================
         if (packet.type == "F") {
-            Log.e("ASM_FINAL", "Ricevuto FINALE")
-            session.isFinalReceived = true
+
+            session.finalReceived = true
+
+            Log.e(
+                "ASM_FINAL",
+                "FINAL RECEIVED total=${session.fullTrack.size}"
+            )
         }
-
-        // =========================
-        // 🔥 TENTA RICOSTRUZIONE
-        // =========================
-        if (session.isFinalReceived) {
-
-            val full = tryReconstruct(packet.sessionId)
-
-            if (full != null) {
-                Log.e("ASM_RECONSTRUCT_OK",
-                    "RICOSTRUZIONE COMPLETA punti=${full.size}"
-                )
-                return full
-            } else {
-                Log.e("ASM_RECONSTRUCT_FAIL",
-                    "FINAL ricevuto ma sequenza incompleta"
-                )
-            }
-        }
-
-        return decodedNow
     }
 
-    private fun tryReconstruct(sessionId: String): List<Pair<Double, Double>>? {
+    // =====================================================
+    // APPEND SENZA DUPLICATI
+    // =====================================================
+    private fun appendPoints(
+        session: SessionBuffer,
+        newPoints: List<Pair<Double, Double>>
+    ) {
 
-        val session = sessions[sessionId] ?: return null
+        for (p in newPoints) {
 
-        val sorted = session.packets.toSortedMap()
+            val last = session.lastPoint
 
-        Log.e("ASM_RECONSTRUCT_START",
-            "SESSION=$sessionId KEYS=${sorted.keys}"
-        )
-
-        var expected = sorted.keys.firstOrNull() ?: return null
-
-        for (key in sorted.keys) {
-
-            Log.e("ASM_SEQ_CHECK",
-                "KEY=$key EXPECTED=$expected"
-            )
-
-            if (key != expected) {
-                Log.e("ASM_SEQ_BREAK",
-                    "BUCO SEQUENZA → expected=$expected got=$key"
-                )
-                return null
+            if (
+                last != null &&
+                kotlin.math.abs(last.first - p.first) < 1e-6 &&
+                kotlin.math.abs(last.second - p.second) < 1e-6
+            ) {
+                continue
             }
 
-            expected++
+            session.fullTrack.add(p)
+
+            session.lastPoint = p
         }
-
-        val allPoints = mutableListOf<Pair<Double, Double>>()
-
-        for ((seq, p) in sorted) {
-
-            val decodedPart = try {
-                val pts = PolylineCodec.decode(p.payload)
-                Log.e("ASM_DECODE_FULL",
-                    "SEQ=$seq POINTS=${pts.size}"
-                )
-                pts
-            } catch (e: Exception) {
-                Log.e("ASM_DECODE_FULL_FAIL", "SEQ=$seq", e)
-                emptyList()
-            }
-
-            allPoints.addAll(decodedPart)
-        }
-
-        sessions.remove(sessionId)
-
-        Log.e("ASM_SESSION_CLOSED", "Sessione rimossa")
-
-        return allPoints
     }
 
-    fun getPartialTrack(sessionId: String): List<Pair<Double, Double>> {
+    // =====================================================
+    fun getFullTrack(): List<Pair<Double, Double>> {
 
-        val session = sessions[sessionId] ?: return emptyList()
+        val sessionId = currentSessionId
+            ?: return emptyList()
 
-        val sorted = session.packets.toSortedMap()
+        val session = sessions[sessionId]
+            ?: return emptyList()
 
-        val result = mutableListOf<Pair<Double, Double>>()
+        return session.fullTrack.toList()
+    }
 
-        var expected = sorted.keys.firstOrNull() ?: return emptyList()
+    // =====================================================
+    fun buildFinalTrack(): List<Pair<Double, Double>>? {
 
-        Log.e("ASM_PARTIAL_START",
-            "SESSION=$sessionId START_EXPECTED=$expected KEYS=${sorted.keys}"
-        )
+        val sessionId = currentSessionId
+            ?: return null
 
-        for ((seq, packet) in sorted) {
+        val session = sessions[sessionId]
+            ?: return null
 
-            Log.e("ASM_PARTIAL_CHECK",
-                "SEQ=$seq EXPECTED=$expected"
-            )
-
-            if (seq != expected) {
-                Log.e("ASM_PARTIAL_BREAK",
-                    "STOP → buco sequenza seq=$seq expected=$expected"
-                )
-                break
-            }
-
-            val decoded = try {
-                val pts = PolylineCodec.decode(packet.payload)
-                Log.e("ASM_PARTIAL_DECODE",
-                    "SEQ=$seq POINTS=${pts.size}"
-                )
-                pts
-            } catch (e: Exception) {
-                Log.e("ASM_PARTIAL_DECODE_FAIL", "SEQ=$seq", e)
-                emptyList()
-            }
-
-            result.addAll(decoded)
-
-            expected++
+        if (!session.finalReceived) {
+            return null
         }
 
-        Log.e("ASM_PARTIAL_RESULT", "TOTAL POINTS=${result.size}")
+        return session.fullTrack.toList()
+    }
 
-        return result
+    // =====================================================
+    fun isComplete(): Boolean {
+
+        val sessionId = currentSessionId
+            ?: return false
+
+        val session = sessions[sessionId]
+            ?: return false
+
+        return session.finalReceived
+    }
+
+    // =====================================================
+    fun reset() {
+
+        sessions.clear()
+
+        currentSessionId = null
+
+        Log.e("ASM_RESET", "RESET COMPLETO")
     }
 }

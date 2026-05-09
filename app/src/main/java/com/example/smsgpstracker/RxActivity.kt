@@ -18,7 +18,6 @@ import android.location.Geocoder
 import android.os.Environment
 import android.provider.MediaStore
 import android.content.ContentValues
-import android.content.ContentUris
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -32,8 +31,9 @@ import com.google.android.gms.maps.model.LatLngBounds
 import androidx.activity.addCallback
 import androidx.appcompat.app.AlertDialog
 import android.util.Log
-import com.example.smsgpstracker.rxmulti.RxMultiSmsParser
-import com.example.smsgpstracker.rxmulti.RxMultiTrackAssembler
+import android.net.Uri
+import java.io.OutputStream
+
 
 
 class RxActivity : AppCompatActivity(), OnMapReadyCallback {
@@ -50,6 +50,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private var trackPolyline: Polyline? = null
     private var lastMarker: Marker? = null
+    private var emergencyMarkers = mutableListOf<Marker>()
+    private var emergencyBlink = false
 
     private var cycloOverlay: TileOverlay? = null
     private var isCycloEnabled = false
@@ -58,6 +60,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private var selectedMapProvider = "GOOGLE"   // GOOGLE o MAPTILER
 
     private val manualPoints = mutableListOf<LatLng>()
+    private val emergencyPoints = mutableListOf<LatLng>()
 
     private val rxAssembler = RxTrackAssembler()
 
@@ -75,6 +78,48 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         override fun onReceive(context: Context?, intent: Intent?) {
             val msg = intent?.getStringExtra("SMS_BODY") ?: return
 
+            val raw = intent.getStringExtra("RAW_SMS")
+
+// =====================================================
+// 🚨 EMERGENCY
+// =====================================================
+            if (msg == "EMERGENCY" && raw != null) {
+
+                try {
+
+                    val parts = raw.split("|")
+
+                    if (parts.size >= 3) {
+
+                        val coords = parts[2].split(",")
+
+                        val lat = coords[0].toDouble()
+                        val lon = coords[1].toDouble()
+
+                        val point = LatLng(lat, lon)
+
+                        emergencyPoints.add(point)
+
+                        Log.d("RX_EMERGENCY", "Emergency aggiunto: $lat,$lon")
+
+                        if (mapReady) {
+
+                            updateEmergencyMarkers()
+
+                            googleMap.animateCamera(
+                                CameraUpdateFactory.newLatLngZoom(point, 17f)
+                            )
+                        }
+                    }
+
+                } catch (e: Exception) {
+
+                    Log.e("RX_EMERGENCY", "Errore parsing", e)
+                }
+
+                return
+            }
+
 
 
             // =====================================================
@@ -84,7 +129,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 try {
 
-                    val assembler = RxTrackAssembler()
+
 
                     val points = rxAssembler.processSms(msg)
 
@@ -232,6 +277,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         txtStatus = findViewById(R.id.txtStatus)
         txtCount = findViewById(R.id.txtCount)
         txtLast = findViewById(R.id.txtLast)
+        startEmergencyBlink()
 
         val mapFragment = supportFragmentManager
             .findFragmentById(R.id.map) as SupportMapFragment
@@ -342,11 +388,61 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         val builder = LatLngBounds.Builder()
         trackPoints.forEach { builder.include(it) }
+        manualPoints.forEach { builder.include(it) }
+        emergencyPoints.forEach { builder.include(it) }
         googleMap.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 150))
 
         txtCount.text = "Punti: ${trackPoints.size}"
         txtLast.text = "Ultima:\n${last.latitude}, ${last.longitude}"
     }
+
+    private fun updateEmergencyMarkers() {
+
+        emergencyMarkers.forEach { it.remove() }
+        emergencyMarkers.clear()
+
+        if (!emergencyBlink) return
+
+        emergencyPoints.forEach { point ->
+
+            val marker = googleMap.addMarker(
+                MarkerOptions()
+                    .position(point)
+                    .title("🚨 EMERGENCY")
+                    .icon(
+                        BitmapDescriptorFactory.defaultMarker(
+                            BitmapDescriptorFactory.HUE_RED
+                        )
+                    )
+            )
+
+            if (marker != null) {
+                emergencyMarkers.add(marker)
+            }
+        }
+    }
+
+    private fun startEmergencyBlink() {
+
+        val handler = Handler(mainLooper)
+
+        val runnable = object : Runnable {
+
+            override fun run() {
+
+                emergencyBlink = !emergencyBlink
+
+                if (mapReady) {
+                    updateEmergencyMarkers()
+                }
+
+                handler.postDelayed(this, 1000)
+            }
+        }
+
+        handler.post(runnable)
+    }
+
 
 
 
@@ -402,6 +498,11 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         trackPoints.clear()
         trackPolyline?.remove()
         lastMarker?.remove()
+        manualPoints.clear()
+        emergencyPoints.clear()
+
+        emergencyMarkers.forEach { it.remove() }
+        emergencyMarkers.clear()
 
         // NON cancellare Google tiles
         googleMap.mapType = GoogleMap.MAP_TYPE_NORMAL
@@ -430,26 +531,68 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         }, 1500)
     }
 
-    private fun generateFinalSnapshot() {
+    private fun takeSnapshotWithRetry(attempt: Int) {
 
+        googleMap.snapshot { bitmap ->
+
+            if (bitmap == null) {
+
+                if (attempt < 3) {
+
+                    Handler(Looper.getMainLooper()).postDelayed({
+
+                        takeSnapshotWithRetry(attempt + 1)
+
+                    }, 1500)
+
+                } else {
+
+                    Log.e("SNAPSHOT", "Snapshot fallita")
+                }
+
+                return@snapshot
+            }
+
+            takeSnapshot()
+        }
+    }
+
+    private fun generateFinalSnapshot() {
 
         if (!mapReady || trackPoints.isEmpty()) return
 
         val builder = LatLngBounds.Builder()
+
         trackPoints.forEach { builder.include(it) }
+        manualPoints.forEach { builder.include(it) }
+        emergencyPoints.forEach { builder.include(it) }
+
         val bounds = builder.build()
 
         googleMap.animateCamera(
             CameraUpdateFactory.newLatLngBounds(bounds, 150),
-            1200,
+            3000,
             object : GoogleMap.CancelableCallback {
 
                 override fun onFinish() {
 
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        takeSnapshotSafely()
-                    }, 1200)
+                    googleMap.setOnMapLoadedCallback {
 
+                        Log.d("SNAPSHOT", "MAP LOADED")
+
+                        // 🔥 WAIT DINAMICO
+                        val extraDelay =
+                            if (selectedMapProvider == "MAPTILER")
+                                3500L
+                            else
+                                800L
+
+                        Handler(Looper.getMainLooper()).postDelayed({
+
+                            takeSnapshotWithRetry(0)
+
+                        }, extraDelay)
+                    }
                 }
 
                 override fun onCancel() {
@@ -471,7 +614,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
             val paintText = Paint().apply {
                 color = Color.BLACK
-                textSize = 22f   // molto piccolo ma leggibile
+                textSize = 22f
                 isAntiAlias = true
             }
 
@@ -482,21 +625,73 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
             val projection = googleMap.projection
 
+            // =====================================================
+            // TRACK POINTS
+            // =====================================================
             trackPoints.forEachIndexed { index, latLng ->
-
-
 
                 val point = projection.toScreenLocation(latLng)
 
                 when {
 
+                    // =====================================================
+                    // 🚨 EMERGENCY PRIORITARIO
+                    // =====================================================
+                    emergencyPoints.any { em ->
+                        kotlin.math.abs(em.latitude - latLng.latitude) < 0.00001 &&
+                                kotlin.math.abs(em.longitude - latLng.longitude) < 0.00001
+                    } -> {
+
+                        paintCircle.color = Color.RED
+
+                        canvas.drawCircle(
+                            point.x.toFloat(),
+                            point.y.toFloat(),
+                            26f,
+                            paintCircle
+                        )
+
+                        paintText.textSize = 36f
+                        paintText.color = Color.RED
+                        paintText.setShadowLayer(4f, 1f, 1f, Color.BLACK)
+
+                        canvas.drawText(
+                            "🚨",
+                            point.x.toFloat() - 20f,
+                            point.y.toFloat() + 14f,
+                            paintText
+                        )
+
+                        paintText.clearShadowLayer()
+
+                        // Coordinate
+                        paintText.textSize = 18f
+                        paintText.color = Color.BLACK
+
+                        canvas.drawText(
+                            "${"%.6f".format(latLng.latitude)}, ${"%.6f".format(latLng.longitude)}",
+                            point.x.toFloat() - 70f,
+                            point.y.toFloat() - 30f,
+                            paintText
+                        )
+                    }
+
+                    // =====================================================
+                    // ⭐ MANUAL POINT
+                    // =====================================================
                     manualPoints.any { manual ->
                         kotlin.math.abs(manual.latitude - latLng.latitude) < 0.00001 &&
                                 kotlin.math.abs(manual.longitude - latLng.longitude) < 0.00001
                     } -> {
 
                         paintCircle.color = Color.YELLOW
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 18f, paintCircle)
+
+                        canvas.drawCircle(
+                            point.x.toFloat(),
+                            point.y.toFloat(),
+                            18f,
+                            paintCircle
+                        )
 
                         paintText.textSize = 34f
                         paintText.color = Color.YELLOW
@@ -509,7 +704,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                             paintText
                         )
 
-                        // 🔹 coordinate piccole sopra la stella
+                        // Coordinate
                         paintText.textSize = 18f
                         paintText.color = Color.BLACK
                         paintText.clearShadowLayer()
@@ -522,10 +717,19 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         )
                     }
 
+                    // =====================================================
+                    // 🟢 START
+                    // =====================================================
                     index == 0 -> {
 
                         paintCircle.color = Color.GREEN
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+
+                        canvas.drawCircle(
+                            point.x.toFloat(),
+                            point.y.toFloat(),
+                            22f,
+                            paintCircle
+                        )
 
                         paintText.textSize = 30f
                         paintText.color = Color.WHITE
@@ -541,10 +745,19 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         paintText.clearShadowLayer()
                     }
 
+                    // =====================================================
+                    // 🔴 END
+                    // =====================================================
                     index == trackPoints.lastIndex -> {
 
                         paintCircle.color = Color.RED
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 22f, paintCircle)
+
+                        canvas.drawCircle(
+                            point.x.toFloat(),
+                            point.y.toFloat(),
+                            22f,
+                            paintCircle
+                        )
 
                         paintText.textSize = 30f
                         paintText.color = Color.WHITE
@@ -560,12 +773,21 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                         paintText.clearShadowLayer()
                     }
 
+                    // =====================================================
+                    // ⚫ PUNTI NORMALI
+                    // =====================================================
                     else -> {
 
                         paintCircle.color = Color.BLACK
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 12f, paintCircle)
 
-                        // Mostra etichetta solo ogni 5 punti
+                        canvas.drawCircle(
+                            point.x.toFloat(),
+                            point.y.toFloat(),
+                            12f,
+                            paintCircle
+                        )
+
+                        // Etichetta ogni 5 punti
                         if (index % 5 == 0) {
 
                             canvas.drawText(
@@ -579,8 +801,14 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 }
             }
 
+            // =====================================================
+            // INFO OVERLAY
+            // =====================================================
             drawInfoOverlay(canvas, bitmap)
 
+            // =====================================================
+            // SAVE
+            // =====================================================
             saveFinalBitmap(bitmap)
         }
     }
@@ -628,62 +856,31 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
             y += 28f
         }
     }
+    private fun generateFileName(lat: Double?, lon: Double?): String {
+
+        val date = java.text.SimpleDateFormat("ddMMMM yyyy", java.util.Locale.ITALIAN)
+            .format(java.util.Date())
+            .uppercase()
+
+        val location = try {
+            if (lat != null && lon != null) {
+                val geocoder = android.location.Geocoder(this, java.util.Locale.ITALIAN)
+                val list = geocoder.getFromLocation(lat, lon, 1)
+
+                if (!list.isNullOrEmpty()) {
+                    list[0].locality ?: "UNKNOWN"
+                } else "UNKNOWN"
+            } else "UNKNOWN"
+        } catch (e: Exception) {
+            "UNKNOWN"
+        }
+
+        return "${date.replace(" ", "")}${location.uppercase()}.jpg"
+    }
     private fun saveFinalBitmap(bitmap: Bitmap) {
 
         try {
 
-            Log.d("SNAPSHOT_DEBUG", "saving bitmap")
-
-            if (trackPoints.isEmpty()) return
-
-            val last = trackPoints.last()
-
-            // ================================
-            // 📍 COMUNE (GEOCODER)
-            // ================================
-            var city = "UNKNOWN"
-
-            try {
-                val geocoder = Geocoder(this, Locale.ITALIAN)
-                val addresses = geocoder.getFromLocation(last.latitude, last.longitude, 1)
-
-                if (!addresses.isNullOrEmpty()) {
-                    city = addresses[0].locality ?: "UNKNOWN"
-                }
-
-            } catch (e: Exception) {
-                Log.e("SNAPSHOT_DEBUG", "Geocoder error", e)
-            }
-
-            // pulizia nome comune
-            city = city
-                .uppercase(Locale.ITALIAN)
-                .replace(" ", "")
-                .replace("[^A-Z]".toRegex(), "")
-
-            if (city == "UNKNOWN") {
-                city = "${"%.4f".format(last.latitude)}_${"%.4f".format(last.longitude)}"
-            }
-
-            // ================================
-            // 📅 DATA FORMATO ITALIANO
-            // ================================
-            val now = Date()
-
-            val day = SimpleDateFormat("dd", Locale.ITALIAN).format(now)
-            val month = SimpleDateFormat("MMMM", Locale.ITALIAN)
-                .format(now)
-                .uppercase(Locale.ITALIAN)
-
-            val year = SimpleDateFormat("yyyy", Locale.ITALIAN).format(now)
-
-            val fileName = "${day}${month}${year}${city}.jpg"
-
-            Log.d("SNAPSHOT_DEBUG", "filename=$fileName")
-
-            // ================================
-            // 🧠 RIDUZIONE MEMORIA
-            // ================================
             val scaled = Bitmap.createScaledBitmap(
                 bitmap,
                 bitmap.width / 2,
@@ -691,43 +888,57 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
                 true
             )
 
-            // ================================
-            // 📂 SALVATAGGIO MEDIASTORE (ANDROID 10+)
-            // ================================
-            val resolver = contentResolver
+            // 🔥 PRENDI ULTIMA POSIZIONE
+            val lastPoint = trackPoints.lastOrNull()
+            val lat = lastPoint?.latitude
+            val lon = lastPoint?.longitude
 
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SMSTracker")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
+            val filename = generateFileName(lat, lon)
+
+            val outputStream: OutputStream?
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+                val resolver = contentResolver
+
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/SMSTracker")
+                }
+
+                val imageUri = resolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    contentValues
+                )
+
+                outputStream = imageUri?.let { resolver.openOutputStream(it) }
+
+            } else {
+
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "SMSTracker"
+                )
+
+                if (!dir.exists()) dir.mkdirs()
+
+                val file = File(dir, filename)
+                outputStream = FileOutputStream(file)
+
+                sendBroadcast(
+                    Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(file))
+                )
             }
 
-            val uri = resolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-
-            if (uri == null) {
-                Log.e("SNAPSHOT_DEBUG", "uri null")
-                return
+            outputStream?.use {
+                scaled.compress(Bitmap.CompressFormat.JPEG, 90, it)
             }
 
-            resolver.openOutputStream(uri)?.use { out ->
-                scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
-            }
-
-            // 🔓 rendi visibile
-            contentValues.clear()
-            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, contentValues, null, null)
-
-            Log.d("SNAPSHOT_DEBUG", "SALVATO in GALLERIA: $fileName")
+            Log.d("SNAPSHOT", "SALVATO OK: $filename")
 
         } catch (e: Exception) {
-
-            Log.e("SNAPSHOT_DEBUG", "save error", e)
-
+            Log.e("SNAPSHOT", "ERRORE SALVATAGGIO", e)
         }
     }
 }

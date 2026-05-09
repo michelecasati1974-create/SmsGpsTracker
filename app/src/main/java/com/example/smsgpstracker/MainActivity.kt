@@ -29,6 +29,9 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, true)
 
         setContentView(R.layout.activity_main)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Log.d("PERMISSION", "Legacy storage mode attivo")
+        }
 
         // 🔐 Permessi runtime
         checkAndRequestPermissions()
@@ -97,6 +100,7 @@ class MainActivity : AppCompatActivity() {
     // 🔐 PERMESSI
     // ============================
     private fun checkAndRequestPermissions() {
+
         val permissions = mutableListOf(
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
@@ -106,8 +110,15 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.READ_PHONE_STATE
         )
 
+        // 🔔 Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // 📁 Android 7–9 → serve per salvare immagini visibili
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
         val missingPermissions = permissions.filter {
