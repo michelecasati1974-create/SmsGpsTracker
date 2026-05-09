@@ -56,7 +56,6 @@ public class TxForegroundService extends Service {
         RECOVERY
     }
     private final AtomicBoolean finalFlushStarted = new AtomicBoolean(false);
-    private SignalLevel currentSignalLevel = SignalLevel.NO_SIGNAL;
     private NetworkState currentNetworkState = NetworkState.NO_SIGNAL;
     private boolean networkAvailable = false;
     private boolean finalSmsSent = false;
@@ -75,7 +74,6 @@ public class TxForegroundService extends Service {
     private final Object smsLock = new Object();
     private long helpMeThresholdMs = 0;
     private float movementThreshold = 35f; // default
-    private LatLng lastReferencePoint = null;
     private boolean noSignalAlertEnabled = false;
     private long noSignalStartTime = 0;
     private long lastVibrationTime = 0;
@@ -84,10 +82,6 @@ public class TxForegroundService extends Service {
     private long lastMovementTime = 0;
     private Location lastMovementLocation = null;
     private long helpMeTimeMs = 120000;
-    private final LinkedList<Integer> signalHistory = new LinkedList<>();
-    private static final int SIGNAL_WINDOW = 10;
-    private final Deque<Integer> signalWindow = new ArrayDeque<>();
-    private static final int WINDOW_SIZE = 10;
     private final Object processingLock = new Object();
     private int currentChunkId = 0;
     public static boolean smsDebugMode = false;
@@ -132,15 +126,12 @@ public class TxForegroundService extends Service {
     private long monitorIntervalMs = 5000;
     private Handler signalHandler = new Handler(Looper.getMainLooper());
     private Runnable signalPollRunnable;
-    private boolean stopMode = false;
     private boolean gpsFixValid = false;
     private boolean continuousMode = false;
     private boolean multiGpsMode = false;
     private boolean autoModeEnabled = true;
     private final List<GpsPoint> fullTrackHistory = new ArrayList<>();
     private static final int MAX_HISTORY_POINTS = 5000;
-    private static final float MOVEMENT_DISTANCE_METERS = 5f;
-    private static final long STOP_TIMEOUT_MS = 120000; // 2 minuti
     private long rxTimeoutMs;
     private Handler rxMonitorHandler = new Handler(Looper.getMainLooper());
     private long lastSmsTime = 0;
@@ -149,7 +140,6 @@ public class TxForegroundService extends Service {
     private static final String SEQ_PREFS = "tx_sequence_prefs";
     private static final String KEY_SEQ = "tx_sequence";
     private static final String KEY_TX_STATE = "tx_state";
-    private Location lastTrackPoint = null;
     private Handler smsHandler = new Handler();
     private Location lastAcceptedLocation = null;
     private volatile boolean stopPending = false;
@@ -186,7 +176,6 @@ public class TxForegroundService extends Service {
     private String generateSessionId() {
         return Integer.toHexString((int)(System.currentTimeMillis() & 0xFFFF)).toUpperCase();
     }
-
 
     private void updateNetworkState(int dbm) {
         handleNoSignalAlert(currentNetworkState);
@@ -504,12 +493,10 @@ public class TxForegroundService extends Service {
     ///////Nuovi parametri configurabili (Settings)/////
     private long lastTrackSmsTime = 0;
     // limite sessione
-    private int maxSmsPerSession = 20;
     // compressione percorso
     private float trackSimplifyDistance = 2.0f;
     // contatori debug
     private int gpsPointsCollected = 0;
-    private int gpsPointsSent = 0;
     private long adaptiveGpsInterval = 3000;
     // ===== MULTI GPS ADVANCED SETTINGS =====
     private float trackSimplifyTolerance = 0.00002f;

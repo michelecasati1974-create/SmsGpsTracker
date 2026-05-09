@@ -495,47 +495,72 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     // =====================================================
     private fun drawAllPoints() {
 
-        if (!mapReady || trackPoints.isEmpty()) return
+        if (!mapReady || trackPoints.isEmpty()) {
+            return
+        }
 
-        // ❌ NON usare più clear()
-        // googleMap.clear()
+        Log.e(
+            "DRAW_TRACK",
+            "drawAllPoints size=${trackPoints.size}"
+        )
 
-        // =========================
-        // 📍 POLYLINE (aggiorna invece di ricreare)
-        // =========================
+        // =========================================
+        // 📍 POLYLINE
+        // =========================================
         if (trackPolyline == null) {
+
             trackPolyline = googleMap.addPolyline(
                 PolylineOptions()
                     .addAll(trackPoints)
                     .width(4f)
                     .color(Color.BLACK)
             )
+
+            Log.e(
+                "DRAW_TRACK",
+                "POLYLINE CREATA"
+            )
+
         } else {
-            if (trackPolyline?.points?.size != trackPoints.size) {
-                trackPolyline?.points = trackPoints
-            }
+
+            // 🔥 SEMPRE UPDATE
+            trackPolyline?.points = trackPoints
+
+            Log.e(
+                "DRAW_TRACK",
+                "POLYLINE UPDATED size=${trackPoints.size}"
+            )
         }
 
-        // =========================
-        // 🔴 ULTIMO PUNTO
-        // =========================
+        // =========================================
+        // 🔴 LAST MARKER
+        // =========================================
         val last = trackPoints.last()
 
         if (lastMarker == null) {
+
             lastMarker = googleMap.addMarker(
                 MarkerOptions()
                     .position(last)
-                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+                    .icon(
+                        BitmapDescriptorFactory.defaultMarker(
+                            BitmapDescriptorFactory.HUE_RED
+                        )
+                    )
             )
+
         } else {
+
             lastMarker?.position = last
         }
 
-        // =========================
-        // ⭐ MANUAL POINTS (NO DUPLICATI)
-        // =========================
-        // pulisci vecchi
-        manualMarkers.forEach { it.remove() }
+        // =========================================
+        // ⭐ MANUAL MARKERS
+        // =========================================
+        manualMarkers.forEach {
+            it.remove()
+        }
+
         manualMarkers.clear()
 
         manualPoints.forEach { point ->
@@ -544,37 +569,78 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                 MarkerOptions()
                     .position(point)
                     .title("⭐ Posizione manuale")
-                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW))
+                    .icon(
+                        BitmapDescriptorFactory.defaultMarker(
+                            BitmapDescriptorFactory.HUE_YELLOW
+                        )
+                    )
             )
 
-            if (marker != null) manualMarkers.add(marker)
+            if (marker != null) {
+                manualMarkers.add(marker)
+            }
         }
 
+        // =========================================
+        // 🚨 EMERGENCY MARKERS
+        // =========================================
+        updateEmergencyMarkers()
 
-
-        // =========================
-        // 📦 CAMERA (solo all'inizio!)
-        // =========================
+        // =========================================
+        // 📦 CAMERA FIT (SOLO PRIMA VOLTA)
+        // =========================================
         if (firstCameraMove) {
 
-            val builder = LatLngBounds.Builder()
+            try {
 
-            trackPoints.forEach { builder.include(it) }
-            manualPoints.forEach { builder.include(it) }
-            emergencyPoints.forEach { builder.include(it) }
+                val builder = LatLngBounds.Builder()
 
-            googleMap.animateCamera(
-                CameraUpdateFactory.newLatLngBounds(builder.build(), 150)
-            )
+                trackPoints.forEach {
+                    builder.include(it)
+                }
 
-            firstCameraMove = false
+                manualPoints.forEach {
+                    builder.include(it)
+                }
+
+                emergencyPoints.forEach {
+                    builder.include(it)
+                }
+
+                val bounds = builder.build()
+
+                Handler(Looper.getMainLooper()).postDelayed({
+
+                    googleMap.animateCamera(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 150)
+                    )
+
+                }, 800)
+
+                firstCameraMove = false
+
+                Log.e(
+                    "DRAW_CAMERA",
+                    "FIT COMPLETATO"
+                )
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    "DRAW_CAMERA",
+                    "ERRORE CAMERA FIT",
+                    e
+                )
+            }
         }
 
-        // =========================
+        // =========================================
         // 📊 UI
-        // =========================
+        // =========================================
         txtCount.text = "Punti: ${trackPoints.size}"
-        txtLast.text = "Ultima:\n${last.latitude}, ${last.longitude}"
+
+        txtLast.text =
+            "Ultima:\n${last.latitude}, ${last.longitude}"
     }
 
 
@@ -706,16 +772,17 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 override fun onFinish() {
 
+                    drawAllPoints()
+
                     googleMap.setOnMapLoadedCallback {
 
                         Log.d("SNAPSHOT", "MAP LOADED")
 
-                        // 🔥 WAIT DINAMICO
                         val extraDelay =
                             if (selectedMapProvider == "MAPTILER")
-                                3500L
+                                8000L
                             else
-                                800L
+                                1200L
 
                         Handler(Looper.getMainLooper()).postDelayed({
 

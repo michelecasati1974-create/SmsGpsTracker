@@ -48,6 +48,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private val trackPoints = mutableListOf<LatLng>()
 
+    private var firstCameraMove = true
+
     private var trackPolyline: Polyline? = null
     private var lastMarker: Marker? = null
     private var emergencyMarkers = mutableListOf<Marker>()
@@ -190,6 +192,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             when (msg) {
 
                 "CTRL:START" -> {
+                    firstCameraMove = true
                     txtStatus.text = "Tracking avviato"
                     resetMapOnly()
 
@@ -367,33 +370,83 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     // DRAW TRACK
     // =====================================================
     private fun drawAllPoints() {
+
         if (!mapReady || trackPoints.isEmpty()) return
 
-        trackPolyline?.remove()
-        lastMarker?.remove()
+        // =========================
+        // 📍 POLYLINE
+        // =========================
+        if (trackPolyline == null) {
 
-        trackPolyline = googleMap.addPolyline(
-            PolylineOptions()
-                .addAll(trackPoints)
-                .width(6f)
-                .color(Color.BLACK)
-        )
+            trackPolyline = googleMap.addPolyline(
+                PolylineOptions()
+                    .addAll(trackPoints)
+                    .width(6f)
+                    .color(Color.BLACK)
+            )
 
+        } else {
+
+            trackPolyline?.points = trackPoints
+        }
+
+        // =========================
+        // 🔴 LAST MARKER
+        // =========================
         val last = trackPoints.last()
-        lastMarker = googleMap.addMarker(
-            MarkerOptions()
-                .position(last)
-                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-        )
 
-        val builder = LatLngBounds.Builder()
-        trackPoints.forEach { builder.include(it) }
-        manualPoints.forEach { builder.include(it) }
-        emergencyPoints.forEach { builder.include(it) }
-        googleMap.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 150))
+        if (lastMarker == null) {
 
+            lastMarker = googleMap.addMarker(
+                MarkerOptions()
+                    .position(last)
+                    .icon(
+                        BitmapDescriptorFactory.defaultMarker(
+                            BitmapDescriptorFactory.HUE_RED
+                        )
+                    )
+            )
+
+        } else {
+
+            lastMarker?.position = last
+        }
+
+        // =========================
+        // 📦 CAMERA SOLO PRIMA VOLTA
+        // =========================
+        if (firstCameraMove) {
+
+            try {
+
+                val builder = LatLngBounds.Builder()
+
+                trackPoints.forEach { builder.include(it) }
+                manualPoints.forEach { builder.include(it) }
+                emergencyPoints.forEach { builder.include(it) }
+
+                googleMap.animateCamera(
+                    CameraUpdateFactory.newLatLngBounds(
+                        builder.build(),
+                        150
+                    )
+                )
+
+                firstCameraMove = false
+
+            } catch (e: Exception) {
+
+                Log.e("MAP_CAMERA", "Errore bounds", e)
+            }
+        }
+
+        // =========================
+        // 📊 UI
+        // =========================
         txtCount.text = "Punti: ${trackPoints.size}"
-        txtLast.text = "Ultima:\n${last.latitude}, ${last.longitude}"
+
+        txtLast.text =
+            "Ultima:\n${last.latitude}, ${last.longitude}"
     }
 
     private fun updateEmergencyMarkers() {
@@ -495,6 +548,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     // RESET MAP
     // =====================================================
     private fun resetMapOnly() {
+
+        firstCameraMove = true
         trackPoints.clear()
         trackPolyline?.remove()
         lastMarker?.remove()
@@ -537,13 +592,18 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
             if (bitmap == null) {
 
-                if (attempt < 3) {
+                if (attempt < 5) {
+
+                    Log.e(
+                        "SNAPSHOT",
+                        "Bitmap NULL retry=$attempt"
+                    )
 
                     Handler(Looper.getMainLooper()).postDelayed({
 
                         takeSnapshotWithRetry(attempt + 1)
 
-                    }, 1500)
+                    }, 2000)
 
                 } else {
 
@@ -553,6 +613,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                 return@snapshot
             }
 
+            Log.d("SNAPSHOT", "Bitmap OK")
+
             takeSnapshot()
         }
     }
@@ -561,45 +623,62 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         if (!mapReady || trackPoints.isEmpty()) return
 
-        val builder = LatLngBounds.Builder()
+        try {
 
-        trackPoints.forEach { builder.include(it) }
-        manualPoints.forEach { builder.include(it) }
-        emergencyPoints.forEach { builder.include(it) }
+            val builder = LatLngBounds.Builder()
 
-        val bounds = builder.build()
+            trackPoints.forEach { builder.include(it) }
+            manualPoints.forEach { builder.include(it) }
+            emergencyPoints.forEach { builder.include(it) }
 
-        googleMap.animateCamera(
-            CameraUpdateFactory.newLatLngBounds(bounds, 150),
-            3000,
-            object : GoogleMap.CancelableCallback {
+            val bounds = builder.build()
 
-                override fun onFinish() {
+            googleMap.animateCamera(
+                CameraUpdateFactory.newLatLngBounds(bounds, 150),
+                3500,
+                object : GoogleMap.CancelableCallback {
 
-                    googleMap.setOnMapLoadedCallback {
+                    override fun onFinish() {
 
-                        Log.d("SNAPSHOT", "MAP LOADED")
+                        Log.d("SNAPSHOT", "CAMERA FINISHED")
 
-                        // 🔥 WAIT DINAMICO
-                        val extraDelay =
-                            if (selectedMapProvider == "MAPTILER")
-                                3500L
-                            else
-                                800L
+                        googleMap.setOnMapLoadedCallback {
 
-                        Handler(Looper.getMainLooper()).postDelayed({
+                            Log.d("SNAPSHOT", "MAP LOADED")
 
-                            takeSnapshotWithRetry(0)
+                            // 🔥 EXTRA WAIT MAPTILER
+                            val extraDelay =
+                                if (selectedMapProvider == "MAPTILER")
+                                    5000L
+                                else
+                                    1200L
 
-                        }, extraDelay)
+                            Handler(Looper.getMainLooper()).postDelayed({
+
+                                Log.d(
+                                    "SNAPSHOT",
+                                    "START SNAPSHOT AFTER WAIT"
+                                )
+
+                                takeSnapshotWithRetry(0)
+
+                            }, extraDelay)
+                        }
+                    }
+
+                    override fun onCancel() {
+
+                        Log.e("SNAPSHOT", "CAMERA CANCELLED")
+
+                        takeSnapshotSafely()
                     }
                 }
+            )
 
-                override fun onCancel() {
-                    takeSnapshotSafely()
-                }
-            }
-        )
+        } catch (e: Exception) {
+
+            Log.e("SNAPSHOT", "generateFinalSnapshot error", e)
+        }
     }
 
     private fun takeSnapshot() {

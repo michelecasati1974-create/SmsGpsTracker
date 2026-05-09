@@ -115,22 +115,47 @@ class RxMultiTrackAssembler {
         newPoints: List<Pair<Double, Double>>
     ) {
 
+        if (newPoints.isEmpty()) {
+            return
+        }
+
+        // =====================================
+        // 🔥 DEDUPLICA SOLO INTERNA AL BLOCCO
+        // =====================================
+        val cleaned = mutableListOf<Pair<Double, Double>>()
+
+        var lastLocal: Pair<Double, Double>? = null
+
         for (p in newPoints) {
 
-            val last = session.lastPoint
-
             if (
-                last != null &&
-                kotlin.math.abs(last.first - p.first) < 1e-6 &&
-                kotlin.math.abs(last.second - p.second) < 1e-6
+                lastLocal != null &&
+                kotlin.math.abs(lastLocal.first - p.first) < 1e-6 &&
+                kotlin.math.abs(lastLocal.second - p.second) < 1e-6
             ) {
+
+                Log.d("ASM_DUP_LOCAL", "PUNTO DUPLICATO BLOCCO")
+
                 continue
             }
 
-            session.fullTrack.add(p)
+            cleaned.add(p)
 
-            session.lastPoint = p
+            lastLocal = p
         }
+
+        // =====================================
+        // 🔥 APPEND GLOBALE SENZA FILTRI
+        // =====================================
+        session.fullTrack.addAll(cleaned)
+
+        // 🔥 ultimo punto SOLO DEBUG/UI
+        session.lastPoint = cleaned.lastOrNull()
+
+        Log.e(
+            "ASM_APPEND",
+            "added=${cleaned.size} total=${session.fullTrack.size}"
+        )
     }
 
     // =====================================================
