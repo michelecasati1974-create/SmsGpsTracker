@@ -1085,6 +1085,7 @@ public class TxForegroundService extends Service {
             // ================================
             Log.e("STOP_DEBUG", "STOP → motivo XYZ");
 
+            stopTrackingInternal();
             saveTxState("IDLE");
 
             return START_NOT_STICKY;
@@ -2674,37 +2675,63 @@ public class TxForegroundService extends Service {
         return out;
     }
     private void stopTrackingInternal() {
+
         Log.e("STOP_DEBUG", "stopTrackingInternal CALLED", new Exception());
-        // 🔴 STOP COMPLETO TRACK HANDLER (FIX CRITICO)
+
+        // 🔴 stato globale
+        isRunning = false;
+
+        // 🔴 reset restore automatico
+        SharedPreferences prefs =
+                getSharedPreferences("TX_STATE", MODE_PRIVATE);
+
+        prefs.edit()
+                .putBoolean("wasRunning", false)
+                .apply();
+
+        // 🔴 stop track handler
         trackHandler.removeCallbacksAndMessages(null);
         trackRunnableScheduled = false;
-        // 🔴 PULIZIA BUFFER
+
+        // 🔴 pulizia buffer
         synchronized (bufferLock) {
             gpsTrackBuffer.clear();
         }
+
         lastTrackSmsTime = 0;
-        if (!isRunning) return;
-        isRunning = false;
-        Log.e("STOP_DEBUG", "isRunning → FALSE");
-        // 🔴 STOP GENERALE HANDLER
+
+        // 🔴 stop handler generali
         handler.removeCallbacksAndMessages(null);
-        // 🔴 STOP RX MONITOR
+
+        // 🔴 stop RX monitor
         rxMonitorHandler.removeCallbacksAndMessages(null);
-        // 🔴 STOP UI
+
+        // 🔴 stop UI
         if (uiRunnable != null) {
             uiHandler.removeCallbacks(uiRunnable);
         }
-        // 🔴 STOP GPS
+
+        // 🔴 stop GPS
         if (continuousLocationCallback != null) {
+
             fusedClient.removeLocationUpdates(continuousLocationCallback);
+
             continuousLocationCallback = null;
         }
-        // 🔴 STOP SMS SCHEDULER
+
+        // 🔴 stop scheduler SMS
         smsHandler.removeCallbacksAndMessages(null);
-        // 🔴 STATO
+
+        // 🔴 update UI
         sendUpdate(TxStatus.IDLE, 0, smsSent);
+
+        // 🔴 stop foreground
         stopForeground(true);
-        sendUpdate(TxStatus.IDLE, 0, smsSent);
+
+        // 🔴 chiusura service
+        stopSelf();
+
+        Log.e("STOP_DEBUG", "SERVICE STOPPED");
     }
     private void sendRxStatus(boolean alive) {
         Intent intent = new Intent(ACTION_UPDATE);
