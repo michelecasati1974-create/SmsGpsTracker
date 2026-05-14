@@ -5,5 +5,6 @@ data class RxMultiSmsPacket(
     val seq: Int,
     val total: Int,
     val type: String,
-    val payloadChunk: String
+    val payloadChunk: String,
+    val segmentId: Long
 )

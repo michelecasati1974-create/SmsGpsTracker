@@ -182,7 +182,10 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                         return
                     }
 
-                    Log.e("RX_FLOW", "PARSE OK seq=${packet.seq}/${packet.total} type=${packet.type}")
+                    Log.e(
+                        "RX_FLOW",
+                        "PARSE OK seg=${packet.segmentId} seq=${packet.seq} type=${packet.type}"
+                    )
 
                     // =========================
                     // 🆕 GESTIONE SESSIONE
@@ -191,14 +194,39 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                     if (previousSession != packet.sessionId) {
 
-                        Log.e("RX_SESSION", "NUOVA SESSIONE → RESET UI")
+                        Log.e(
+                            "RX_SESSION",
+                            "NUOVA SESSIONE → RESET COMPLETO old=$previousSession new=${packet.sessionId}"
+                        )
 
+                        // =========================
+                        // RESET TRACK
+                        // =========================
                         trackPoints.clear()
+
                         RxMultiTrackRepository.points.clear()
 
+                        // =========================
+                        // RESET ASSEMBLER
+                        // =========================
                         multiAssembler.reset()
 
+                        // =========================
+                        // RESET UI MAPPA
+                        // =========================
+                        trackPolyline?.remove()
+                        trackPolyline = null
+
+                        lastMarker?.remove()
+                        lastMarker = null
+
                         firstCameraMove = true
+
+                        txtStatus.text = "Nuova sessione RX"
+
+                        txtCount.text = "0"
+
+                        txtLast.text = "--"
                     }
 
                     RxMultiTrackRepository.currentSessionId = packet.sessionId
@@ -209,55 +237,110 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     multiAssembler.process(packet)
 
                     // =========================
-                    // 🔁 TRACK CUMULATIVO REALE
+                    // REALTIME TRACK UPDATE
                     // =========================
-                    val cumulative = multiAssembler.getFullTrack()
+                    val liveTrack = multiAssembler.getFullTrack()
 
-                    if (cumulative.isNotEmpty()) {
+                    if (liveTrack.isNotEmpty()) {
 
-                        // 🔥 SALVATAGGIO PERSISTENTE (FONDAMENTALE)
-                        RxMultiTrackRepository.points.clear()
-                        RxMultiTrackRepository.points.addAll(cumulative)
-
-                        // 🔥 UI
                         trackPoints.clear()
-                        trackPoints.addAll(cumulative.map { LatLng(it.first, it.second) })
 
-                        if (mapReady) drawAllPoints()
+                        trackPoints.addAll(
+                            liveTrack.map {
+                                LatLng(it.first, it.second)
+                            }
+                        )
+
+                        RxMultiTrackRepository.points.clear()
+
+                        RxMultiTrackRepository.points.addAll(liveTrack)
+
+                        if (mapReady) {
+                            drawAllPoints()
+                        }
                     }
+
+                    txtCount.text =
+                        "SEG ${packet.segmentId} • SEQ ${packet.seq}"
+
 
                     // =========================
                     // 🏁 CHIUSURA SU F (ROBUSTA)
                     // =========================
                     if (packet.type == "F") {
 
-                        Log.e("RX_FINAL", "F RICEVUTO → chiusura tracking")
+                        Log.e(
+                            "RX_FINAL",
+                            "FINAL RX seg=${packet.segmentId} seq=${packet.seq}"
+                        )
 
                         val finalTrack = multiAssembler.buildFinalTrack()
 
-                        if (finalTrack != null && finalTrack.isNotEmpty()) {
+                        if (!finalTrack.isNullOrEmpty()) {
 
                             RxMultiTrackRepository.points.clear()
+
                             RxMultiTrackRepository.points.addAll(finalTrack)
 
                             trackPoints.clear()
-                            trackPoints.addAll(finalTrack.map { LatLng(it.first, it.second) })
 
-                            if (mapReady) drawAllPoints()
-                        }
+                            trackPoints.addAll(
+                                finalTrack.map {
+                                    LatLng(it.first, it.second)
+                                }
+                            )
 
-                        txtStatus.text = "Tracking completato"
+                            if (mapReady) {
+                                drawAllPoints()
+                            }
 
-                        if (trackPoints.isNotEmpty()) {
+                            txtStatus.text =
+                                "Tracking completato (${finalTrack.size} punti)"
+
+                            // =========================
+                            // SNAPSHOT FINALE
+                            // =========================
                             Handler(mainLooper).postDelayed({
-                                generateFinalSnapshot()
-                            }, 2000)
+
+                                try {
+
+                                    generateFinalSnapshot()
+
+                                } catch (e: Exception) {
+
+                                    Log.e(
+                                        "RX_SNAPSHOT",
+                                        "Errore snapshot finale",
+                                        e
+                                    )
+                                }
+
+                            }, 2500)
+
+                        } else {
+
+                            Log.e(
+                                "RX_FINAL",
+                                "FINAL ricevuto ma track vuota"
+                            )
+
+                            txtStatus.text =
+                                "Finale ricevuto ma track incompleta"
                         }
 
-                        // 🔴 RESET DOPO SNAPSHOT (NON SUBITO!)
+                        // =========================
+                        // RESET RITARDATO
+                        // =========================
                         Handler(mainLooper).postDelayed({
+
+                            Log.e(
+                                "RX_FINAL",
+                                "AUTO RESET assembler"
+                            )
+
                             multiAssembler.reset()
-                        }, 4000)
+
+                        }, 20000)
 
                         return
                     }
@@ -524,7 +607,27 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         } else {
 
             // 🔥 SEMPRE UPDATE
-            trackPolyline?.points = trackPoints
+            try {
+
+                trackPolyline?.points = trackPoints
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    "DRAW_TRACK",
+                    "Polyline update failed",
+                    e
+                )
+
+                trackPolyline?.remove()
+
+                trackPolyline = googleMap.addPolyline(
+                    PolylineOptions()
+                        .addAll(trackPoints)
+                        .width(4f)
+                        .color(Color.BLACK)
+                )
+            }
 
             Log.e(
                 "DRAW_TRACK",
@@ -589,7 +692,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         // =========================================
         // 📦 CAMERA FIT (SOLO PRIMA VOLTA)
         // =========================================
-        if (firstCameraMove) {
+        if (firstCameraMove && trackPoints.size > 3) {
 
             try {
 
@@ -809,8 +912,19 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         googleMap.snapshot { originalBitmap ->
 
-            if (originalBitmap == null) return@snapshot
-            if (trackPoints.isEmpty()) return@snapshot
+            if (originalBitmap == null) {
+
+                Log.e("SNAPSHOT", "Bitmap NULL")
+
+                return@snapshot
+            }
+
+            if (trackPoints.size < 2) {
+
+                Log.e("SNAPSHOT", "Track insufficiente")
+
+                return@snapshot
+            }
 
             val bitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(bitmap)

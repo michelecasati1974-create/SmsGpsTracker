@@ -3,113 +3,257 @@ package com.example.smsgpstracker.rxmulti
 import android.util.Base64
 import android.util.Log
 import com.example.smsgpstracker.tx.PolylineCodec
+import java.util.concurrent.ConcurrentHashMap
 
 class RxMultiTrackAssembler {
 
-    data class SessionBuffer(
+    // =====================================================
+    // SEGMENT BUFFER
+    // =====================================================
 
-        // seq ricevuti
-        val receivedSeq: MutableSet<Int> = mutableSetOf(),
+    data class SegmentBuffer(
 
-        // track completo
-        val fullTrack: MutableList<Pair<Double, Double>> = mutableListOf(),
+        val chunks:
+        MutableMap<Int, String> = mutableMapOf(),
 
-        // ultimo punto
-        var lastPoint: Pair<Double, Double>? = null,
+        var totalChunks: Int = -1,
 
-        // finale ricevuto
         var finalReceived: Boolean = false,
 
+        var completed: Boolean = false,
+
+        var lastUpdate: Long =
+            System.currentTimeMillis()
     )
 
-    private val sessions = mutableMapOf<String, SessionBuffer>()
+    // =====================================================
+    // SESSION BUFFER
+    // =====================================================
+
+    data class SessionBuffer(
+
+        val segments:
+        MutableMap<Long, SegmentBuffer> = mutableMapOf(),
+
+        val fullTrack:
+        MutableList<Pair<Double, Double>> = mutableListOf(),
+
+        var lastPoint:
+        Pair<Double, Double>? = null,
+
+        var finalReceived: Boolean = false
+    )
+
+    // =====================================================
+
+    private val sessions =
+        ConcurrentHashMap<String, SessionBuffer>()
 
     private var currentSessionId: String? = null
 
     // =====================================================
     // PROCESS
     // =====================================================
+
     fun process(packet: RxMultiSmsPacket) {
 
-        val sessionId = packet.sessionId
+        cleanupOldSessions()
 
-        // =========================================
-        // NUOVA SESSIONE
-        // =========================================
-        if (currentSessionId != sessionId) {
+        val sessionId =
+            packet.sessionId
 
-            Log.e("ASM_SESSION", "NEW SESSION RESET")
+        val segmentId =
+            packet.segmentId
 
-            sessions.clear()
+        currentSessionId = sessionId
 
-            currentSessionId = sessionId
-        }
+        val session =
+            sessions.getOrPut(sessionId) {
+                SessionBuffer()
+            }
 
-        val session = sessions.getOrPut(sessionId) {
-            SessionBuffer()
-        }
+        val segment =
+            session.segments.getOrPut(segmentId) {
+                SegmentBuffer()
+            }
 
-        // =========================================
+        segment.lastUpdate =
+            System.currentTimeMillis()
+
+        // =================================================
         // DUPLICATI
-        // =========================================
-        if (session.receivedSeq.contains(packet.seq)) {
+        // =================================================
 
-            Log.d("ASM_DUP", "SEQ ${packet.seq} ignorato")
+        if (segment.chunks.containsKey(packet.seq)) {
+
+            Log.d(
+                "ASM_DUP",
+                "segment=$segmentId seq=${packet.seq}"
+            )
 
             return
         }
 
-        session.receivedSeq.add(packet.seq)
+        // =================================================
+        // STORE CHUNK
+        // =================================================
 
-        // =========================================
-        // DECODE SINGOLO SMS
-        // =========================================
-        try {
+        segment.chunks[packet.seq] =
+            packet.payloadChunk
 
-            val bytes = Base64.decode(
-                packet.payloadChunk,
-                Base64.URL_SAFE or Base64.NO_WRAP
-            )
+        segment.totalChunks =
+            packet.total
 
-            val decoded =
-                String(bytes, Charsets.UTF_8)
-
-            val points =
-                PolylineCodec.decode(decoded)
-
-            appendPoints(session, points)
-
-            Log.e(
-                "ASM_APPEND",
-                "seq=${packet.seq} points=${points.size} total=${session.fullTrack.size}"
-            )
-
-        } catch (e: Exception) {
-
-            Log.e(
-                "ASM_DECODE",
-                "DECODE FAILED seq=${packet.seq}",
-                e
-            )
-        }
-
-        // =========================================
-        // FINAL
-        // =========================================
         if (packet.type == "F") {
+
+            segment.finalReceived = true
 
             session.finalReceived = true
 
             Log.e(
                 "ASM_FINAL",
-                "FINAL RECEIVED total=${session.fullTrack.size}"
+                "FINAL segment=$segmentId"
+            )
+        }
+
+        Log.d(
+            "ASM_STORE",
+            "segment=$segmentId seq=${packet.seq}/${packet.total}"
+        )
+
+        // =================================================
+        // SEGMENT COMPLETE?
+        // =================================================
+
+        if (!isSegmentComplete(segment)) {
+            return
+        }
+
+        // evita rebuild multipli
+        if (segment.completed) {
+            return
+        }
+
+        segment.completed = true
+
+        rebuildSegment(
+            session,
+            segmentId,
+            segment
+        )
+    }
+
+    // =====================================================
+    // COMPLETE CHECK
+    // =====================================================
+
+    private fun isSegmentComplete(
+        segment: SegmentBuffer
+    ): Boolean {
+
+        if (segment.totalChunks <= 0) {
+            return false
+        }
+
+        for (i in 0 until segment.totalChunks) {
+
+            if (!segment.chunks.containsKey(i)) {
+
+                Log.w(
+                    "ASM_MISSING",
+                    "missing seq=$i"
+                )
+
+                return false
+            }
+        }
+
+        return true
+    }
+
+    // =====================================================
+    // REBUILD SEGMENT
+    // =====================================================
+
+    private fun rebuildSegment(
+        session: SessionBuffer,
+        segmentId: Long,
+        segment: SegmentBuffer
+    ) {
+
+        try {
+
+            val builder =
+                StringBuilder()
+
+            // =============================================
+            // RIORDINO
+            // =============================================
+
+            for (i in 0 until segment.totalChunks) {
+
+                builder.append(
+                    segment.chunks[i]
+                )
+            }
+
+            val fullBase64 =
+                builder.toString()
+
+            Log.e(
+                "ASM_REBUILD",
+                "segment=$segmentId len=${fullBase64.length}"
+            )
+
+            // =============================================
+            // BASE64 FULL DECODE
+            // =============================================
+
+            val decodedBytes =
+                Base64.decode(
+                    fullBase64,
+                    Base64.URL_SAFE or Base64.NO_WRAP
+                )
+
+            val encodedPolyline =
+                String(
+                    decodedBytes,
+                    Charsets.UTF_8
+                )
+
+            // =============================================
+            // POLYLINE DECODE
+            // =============================================
+
+            val points =
+                PolylineCodec.decode(
+                    encodedPolyline
+                )
+
+            appendPoints(
+                session,
+                points
+            )
+
+            Log.e(
+                "ASM_OK",
+                "segment=$segmentId points=${points.size}"
+            )
+
+        } catch (e: Exception) {
+
+            Log.e(
+                "ASM_REBUILD_ERR",
+                "segment=$segmentId",
+                e
             )
         }
     }
 
     // =====================================================
-    // APPEND SENZA DUPLICATI
+    // APPEND SAFE
     // =====================================================
+
     private fun appendPoints(
         session: SessionBuffer,
         newPoints: List<Pair<Double, Double>>
@@ -119,22 +263,23 @@ class RxMultiTrackAssembler {
             return
         }
 
-        // =====================================
-        // 🔥 DEDUPLICA SOLO INTERNA AL BLOCCO
-        // =====================================
-        val cleaned = mutableListOf<Pair<Double, Double>>()
+        val cleaned =
+            mutableListOf<Pair<Double, Double>>()
 
-        var lastLocal: Pair<Double, Double>? = null
+        var lastLocal:
+                Pair<Double, Double>? = null
 
         for (p in newPoints) {
 
             if (
                 lastLocal != null &&
-                kotlin.math.abs(lastLocal.first - p.first) < 1e-6 &&
-                kotlin.math.abs(lastLocal.second - p.second) < 1e-6
+                kotlin.math.abs(
+                    lastLocal.first - p.first
+                ) < 1e-6 &&
+                kotlin.math.abs(
+                    lastLocal.second - p.second
+                ) < 1e-6
             ) {
-
-                Log.d("ASM_DUP_LOCAL", "PUNTO DUPLICATO BLOCCO")
 
                 continue
             }
@@ -144,40 +289,68 @@ class RxMultiTrackAssembler {
             lastLocal = p
         }
 
-        // =====================================
-        // 🔥 APPEND GLOBALE SENZA FILTRI
-        // =====================================
-        session.fullTrack.addAll(cleaned)
+        // =============================================
+        // DEDUP GLOBALE
+        // =============================================
 
-        // 🔥 ultimo punto SOLO DEBUG/UI
-        session.lastPoint = cleaned.lastOrNull()
+        for (p in cleaned) {
+
+            val last =
+                session.fullTrack.lastOrNull()
+
+            if (
+                last != null &&
+                kotlin.math.abs(last.first - p.first) < 1e-6 &&
+                kotlin.math.abs(last.second - p.second) < 1e-6
+            ) {
+
+                continue
+            }
+
+            session.fullTrack.add(p)
+        }
+
+        session.lastPoint =
+            session.fullTrack.lastOrNull()
 
         Log.e(
             "ASM_APPEND",
-            "added=${cleaned.size} total=${session.fullTrack.size}"
+            "total=${session.fullTrack.size}"
         )
     }
 
     // =====================================================
-    fun getFullTrack(): List<Pair<Double, Double>> {
+    // GET TRACK
+    // =====================================================
 
-        val sessionId = currentSessionId
-            ?: return emptyList()
+    fun getFullTrack():
+            List<Pair<Double, Double>> {
 
-        val session = sessions[sessionId]
-            ?: return emptyList()
+        val sessionId =
+            currentSessionId
+                ?: return emptyList()
+
+        val session =
+            sessions[sessionId]
+                ?: return emptyList()
 
         return session.fullTrack.toList()
     }
 
     // =====================================================
-    fun buildFinalTrack(): List<Pair<Double, Double>>? {
+    // FINAL TRACK
+    // =====================================================
 
-        val sessionId = currentSessionId
-            ?: return null
+    fun buildFinalTrack():
+            List<Pair<Double, Double>>? {
 
-        val session = sessions[sessionId]
-            ?: return null
+        val sessionId =
+            currentSessionId
+                ?: return null
+
+        val session =
+            sessions[sessionId]
+                ?: return null
 
         if (!session.finalReceived) {
             return null
@@ -187,24 +360,78 @@ class RxMultiTrackAssembler {
     }
 
     // =====================================================
+    // COMPLETE
+    // =====================================================
+
     fun isComplete(): Boolean {
 
-        val sessionId = currentSessionId
-            ?: return false
+        val sessionId =
+            currentSessionId
+                ?: return false
 
-        val session = sessions[sessionId]
-            ?: return false
+        val session =
+            sessions[sessionId]
+                ?: return false
 
         return session.finalReceived
     }
 
     // =====================================================
+    // CLEANUP
+    // =====================================================
+
+    private fun cleanupOldSessions() {
+
+        val now =
+            System.currentTimeMillis()
+
+        val iterator =
+            sessions.entries.iterator()
+
+        while (iterator.hasNext()) {
+
+            val entry = iterator.next()
+
+            val session =
+                entry.value
+
+            var newest = 0L
+
+            for (segment in session.segments.values) {
+
+                newest =
+                    maxOf(
+                        newest,
+                        segment.lastUpdate
+                    )
+            }
+
+            if (
+                newest > 0 &&
+                now - newest > 5 * 60 * 1000
+            ) {
+
+                Log.w(
+                    "ASM_CLEAN",
+                    "remove session=${entry.key}"
+                )
+
+                iterator.remove()
+            }
+        }
+    }
+
+    // =====================================================
+
     fun reset() {
 
         sessions.clear()
 
         currentSessionId = null
 
-        Log.e("ASM_RESET", "RESET COMPLETO")
+        Log.e(
+            "ASM_RESET",
+            "RESET COMPLETO"
+        )
     }
 }

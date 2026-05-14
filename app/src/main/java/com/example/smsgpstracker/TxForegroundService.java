@@ -29,8 +29,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.LinkedList;
-import java.util.Deque;
-import java.util.ArrayDeque;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Queue;
 import android.util.Base64;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +39,7 @@ import android.content.IntentFilter;
 import android.os.Build;
 import androidx.core.content.ContextCompat;
 import android.app.Activity;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TxForegroundService extends Service {
     public enum SignalLevel {
@@ -59,12 +59,18 @@ public class TxForegroundService extends Service {
     private NetworkState currentNetworkState = NetworkState.NO_SIGNAL;
     private boolean networkAvailable = false;
     private boolean finalSmsSent = false;
-    private int lastSentPointIndex = 0;
     private boolean trackRunnableScheduled = false;
     // ================================
     // 📦 QUEUE + STATO
     // ================================
     private final Queue<SmsBatch> smsQueue = new LinkedList<>();
+
+    private final AtomicLong nextPointId =
+            new AtomicLong(1);
+
+    private final AtomicLong nextSegmentId =
+            new AtomicLong(1);
+
     private boolean smsReceiverRegistered = false;
     private boolean isSending = false;
     private String sessionMode = "STANDARD";
@@ -130,7 +136,11 @@ public class TxForegroundService extends Service {
     private boolean continuousMode = false;
     private boolean multiGpsMode = false;
     private boolean autoModeEnabled = true;
-    private final List<GpsPoint> fullTrackHistory = new ArrayList<>();
+    private final List<TrackPointEx> fullTrackHistory =
+            new ArrayList<>();
+
+    private final ConcurrentHashMap<Long, TrackSegment>
+            pendingSegments = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY_POINTS = 5000;
     private long rxTimeoutMs;
     private Handler rxMonitorHandler = new Handler(Looper.getMainLooper());
@@ -166,6 +176,29 @@ public class TxForegroundService extends Service {
             this.isFinal = isFinal;
         }
     }
+
+    private static class TrackSegment {
+
+        long segmentId;
+
+        long startPointId;
+
+        long endPointId;
+
+        long createdAt;
+
+        boolean acknowledged;
+
+        int retryCount;
+
+        String encodedPayload;
+
+        List<TrackPointEx> points;
+    }
+
+
+
+
     // =======================
     // SMS PROTOCOLLO
     // =======================
@@ -879,7 +912,7 @@ public class TxForegroundService extends Service {
 
             gpsTrackBuffer.clear();
             fullTrackHistory.clear();
-            lastSentPointIndex = 0;
+
 
             finalSmsSent = false;
             finalFlushStarted.set(false);
@@ -2061,6 +2094,15 @@ public class TxForegroundService extends Service {
 
         return chunks;
     }
+
+    private static class TrackPointEx {
+        long pointId;
+        Location location;
+        long timestamp;
+    }
+
+
+
     private void processTrackBuffer() {
         Log.e("FLUSH_STATE",
                 "ENTER processTrackBuffer | isFinalFlush=" + isFinalFlush +
@@ -2105,6 +2147,7 @@ public class TxForegroundService extends Service {
         }
         try {
             List<GpsPoint> rawPoints = new ArrayList<>();
+            TrackSegment segment = null;
             // ================================
             // 📦 BUFFER READ
             // ================================
@@ -2139,51 +2182,135 @@ public class TxForegroundService extends Service {
                     }
                 }
                 // =========================
-                // 🔥 ACCUMULO VERO (FONDAMENTALE)
+                // 🔥 ACCUMULO VERO (NUOVA VERSIONE TrackPointEx)
                 // =========================
-                for (GpsPoint p : current) {
+
+                for (GpsPoint gps : current) {
+
+                    TrackPointEx newPoint = new TrackPointEx();
+
+                    newPoint.pointId =
+                            nextPointId.getAndIncrement();
+
+                    Location loc = new Location("gps");
+
+                    loc.setLatitude(gps.getLat());
+                    loc.setLongitude(gps.getLon());
+
+                    newPoint.location = loc;
+
+                    newPoint.timestamp =
+                            System.currentTimeMillis();
 
                     if (fullTrackHistory.isEmpty()) {
 
-                        fullTrackHistory.add(p);
+                        fullTrackHistory.add(newPoint);
                         continue;
                     }
 
-                    GpsPoint last =
+                    TrackPointEx last =
                             fullTrackHistory.get(fullTrackHistory.size() - 1);
 
-                    if (Math.abs(last.getLat() - p.getLat()) > 0.000001 ||
-                            Math.abs(last.getLon() - p.getLon()) > 0.000001) {
+                    Location lastLoc = last.location;
+                    Location newLoc = newPoint.location;
 
-                        fullTrackHistory.add(p);
+                    if (Math.abs(lastLoc.getLatitude() - newLoc.getLatitude()) > 0.000001 ||
+                            Math.abs(lastLoc.getLongitude() - newLoc.getLongitude()) > 0.000001) {
+
+                        fullTrackHistory.add(newPoint);
                     }
                 }
+
                 // 🔥 LIMIT MEMORIA
 
                 if (fullTrackHistory.size() > MAX_HISTORY_POINTS) {
 
                     Log.w("MEMORY", "HISTORY TRIM");
 
-                    fullTrackHistory.subList(
-                            0,
-                            fullTrackHistory.size() - 4000
-                    ).clear();
+                    int trimCount =
+                            fullTrackHistory.size() - 4000;
+
+                    if (trimCount > 0) {
+
+                        fullTrackHistory.subList(
+                                0,
+                                trimCount
+                        ).clear();
+                    }
                 }
 
-                if (lastSentPointIndex >= fullTrackHistory.size()) {
+                // =========================
+                // 🔥 COSTRUZIONE SEGMENTO TEMPORANEO
+                // =========================
 
-                    Log.d("TX_FLOW", "Nessun nuovo punto");
+                rawPoints = new ArrayList<>();
+
+                // ultimi punti della history
+                int startIndex = Math.max(
+                        0,
+                        fullTrackHistory.size() - 300
+                );
+
+                List<TrackPointEx> segmentPoints =
+                        new ArrayList<>(
+                                fullTrackHistory.subList(
+                                        startIndex,
+                                        fullTrackHistory.size()
+                                )
+                        );
+
+                segment = new TrackSegment();
+
+                segment.segmentId =
+                        nextSegmentId.getAndIncrement();
+
+                segment.createdAt =
+                        System.currentTimeMillis();
+
+                segment.points =
+                        new ArrayList<>(segmentPoints);
+
+                if (segmentPoints.isEmpty()) {
+
+                    Log.d("TX_FLOW", "Nessun punto disponibile");
 
                     return;
                 }
 
-                rawPoints = new ArrayList<>(
+                segment.startPointId =
+                        segmentPoints.get(0).pointId;
 
-                        fullTrackHistory.subList(
-                                lastSentPointIndex,
-                                fullTrackHistory.size()
-                        )
+                segment.endPointId =
+                        segmentPoints.get(segmentPoints.size() - 1).pointId;
+
+                segment.acknowledged = false;
+
+                segment.retryCount = 0;
+
+                pendingSegments.put(
+                        segment.segmentId,
+                        segment
                 );
+
+
+
+                // =========================
+                // 🔥 CONVERSIONE TrackPointEx -> GpsPoint
+                // =========================
+
+                for (TrackPointEx tp : segmentPoints) {
+
+                    Location loc = tp.location;
+
+                    rawPoints.add(new GpsPoint(
+                            tp.timestamp,
+                            loc.getLatitude(),
+                            loc.getLongitude(),
+                            loc.hasAccuracy()
+                                    ? loc.getAccuracy()
+                                    : 0f
+                    ));
+                }
 
                 Log.d("TX_FLOW",
                         "NEW POINTS ONLY = " + rawPoints.size());
@@ -2195,10 +2322,10 @@ public class TxForegroundService extends Service {
 
             long now = System.currentTimeMillis();
 
-                    // ================================
-                    // 📍 CONVERSIONE
-                    // ================================
-                    List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
+            // ================================
+            // 📍 CONVERSIONE
+            // ================================
+            List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
 
             // ================================
             // 🔥 WORKING COPY (NO LOSS TRACK)
@@ -2221,72 +2348,72 @@ public class TxForegroundService extends Service {
                 Log.w("ADAPT", "Compression reduction: " + workingPoints.size());
             }
 
-                    // ================================
-                    // 🔴 SMART POINT REDUCTION (NO LOSS TRACK)
-                    // ================================
-                    if (workingPoints.size() > 300) {
+            // ================================
+            // 🔴 SMART POINT REDUCTION (NO LOSS TRACK)
+            // ================================
+            if (workingPoints.size() > 300) {
 
-                        Log.w("ADAPT", "SMART REDUCTION → original: " + workingPoints.size());
+                Log.w("ADAPT", "SMART REDUCTION → original: " + workingPoints.size());
 
-                        // 🔥 mantieni inizio + fine + campionamento centrale
-                        List<LatLng> reduced = new ArrayList<>();
+                // 🔥 mantieni inizio + fine + campionamento centrale
+                List<LatLng> reduced = new ArrayList<>();
 
-                        int keepHead = Math.min(50, workingPoints.size() / 2);
-                        int keepTail = keepHead;
+                int keepHead = Math.min(50, workingPoints.size() / 2);
+                int keepTail = keepHead;
 
-                        // MIDDLE (sampling)
-                        int step = Math.max(1, workingPoints.size() / 200);
-                        for (int i = keepHead; i < workingPoints.size() - keepTail; i += step) {
-                            reduced.add(workingPoints.get(i));
-                        }
+                // MIDDLE (sampling)
+                int step = Math.max(1, workingPoints.size() / 200);
+                for (int i = keepHead; i < workingPoints.size() - keepTail; i += step) {
+                    reduced.add(workingPoints.get(i));
+                }
 
-                        // END
-                        reduced.addAll(workingPoints.subList(
-                                workingPoints.size() - keepTail,
-                                workingPoints.size()
-                        ));
+                // END
+                reduced.addAll(workingPoints.subList(
+                        workingPoints.size() - keepTail,
+                        workingPoints.size()
+                ));
 
-                        workingPoints = reduced;
+                workingPoints = reduced;
 
-                        Log.w("ADAPT", "AFTER REDUCTION → " + workingPoints.size());
+                Log.w("ADAPT", "AFTER REDUCTION → " + workingPoints.size());
+            }
+
+
+            // ================================
+            // 🔥 CURVE PROTECTION (PRIMA DELLA COMPRESSIONE)
+            // ================================
+            if (workingPoints.size() > 3) {
+
+                List<LatLng> protectedPoints = new ArrayList<>();
+
+                int step = Math.max(1, workingPoints.size() / 150); // 🔥 base sampling
+
+                for (int i = 0; i < workingPoints.size(); i++) {
+
+                    // 🔹 sampling base (mantieni struttura)
+                    if (i % step == 0) {
+                        protectedPoints.add(workingPoints.get(i));
+                        continue;
                     }
 
+                    // 🔹 protezione curve
+                    if (i > 0 && i < workingPoints.size() - 1) {
 
-                    // ================================
-                    // 🔥 CURVE PROTECTION (PRIMA DELLA COMPRESSIONE)
-                    // ================================
-                    if (workingPoints.size() > 3) {
+                        LatLng prev = workingPoints.get(i - 1);
+                        LatLng curr = workingPoints.get(i);
+                        LatLng next = workingPoints.get(i + 1);
 
-                        List<LatLng> protectedPoints = new ArrayList<>();
+                        double angle = calculateAngle(prev, curr, next);
 
-                        int step = Math.max(1, workingPoints.size() / 150); // 🔥 base sampling
-
-                        for (int i = 0; i < workingPoints.size(); i++) {
-
-                            // 🔹 sampling base (mantieni struttura)
-                            if (i % step == 0) {
-                                protectedPoints.add(workingPoints.get(i));
-                                continue;
-                            }
-
-                            // 🔹 protezione curve
-                            if (i > 0 && i < workingPoints.size() - 1) {
-
-                                LatLng prev = workingPoints.get(i - 1);
-                                LatLng curr = workingPoints.get(i);
-                                LatLng next = workingPoints.get(i + 1);
-
-                                double angle = calculateAngle(prev, curr, next);
-
-                                if (angle < 150) { // 🔥 più selettivo
-                                    protectedPoints.add(curr);
-                                }
-                            }
+                        if (angle < 150) { // 🔥 più selettivo
+                            protectedPoints.add(curr);
                         }
+                    }
+                }
 
-                        workingPoints = protectedPoints;
+                workingPoints = protectedPoints;
 
-                        Log.d("CURVE", "Protected points=" + protectedPoints.size());
+                Log.d("CURVE", "Protected points=" + protectedPoints.size());
             }
             /// ================================
             // 🎯 PARAMETRI SMS
@@ -2295,7 +2422,12 @@ public class TxForegroundService extends Service {
 
             // header di STIMA (non reale)
             // worst case realistico (sicuro)
-            String testHeader = "TX|" + currentSessionId + "|999/999|F|";
+            String testHeader =
+                    "TX|" +
+                            currentSessionId +
+                            "|999999|" +
+                            "999999|" +
+                            "F|";
 
             int headerLen = testHeader.length();
             int crcLen = 3;
@@ -2503,35 +2635,42 @@ public class TxForegroundService extends Service {
                             " finalStarted=" + finalFlushStarted.get() +
                             " => REAL=" + isRealFinalFlush);
             // ================================
-// 🚀 COSTRUZIONE SMS AUTONOMI
-// ================================
+            // 🚀 COSTRUZIONE SMS AUTONOMI
+            // ================================
 
             // ================================
-// 🚀 SPLIT BASE64 CORRETTO
-// ================================
+            // 🚀 SPLIT BASE64 CORRETTO
+            // ================================
 
             List<String> parts = new ArrayList<>();
 
-// 🔥 Base64 COMPLETA del track
+            // 🔥 Base64 COMPLETA del track
             String fullEncoded = Base64.encodeToString(
                     res.encoded.getBytes(StandardCharsets.UTF_8),
                     Base64.URL_SAFE | Base64.NO_WRAP
             );
+            if (segment == null) {
 
-// ================================
-// 📏 DIMENSIONE PAYLOAD
-// ================================
+                Log.e("TX_FATAL",
+                        "segment NULL");
 
-// margine sicurezza reale
+                return;
+            }
+            segment.encodedPayload = fullEncoded;
+            // ================================
+            // 📏 DIMENSIONE PAYLOAD
+            // ================================
+
+            // margine sicurezza reale
 
 
             int maxPayloadLen =
                     140
                             - testHeader.length()
-                            - 3   // CRC
-                            - 1;  // separatore
+                            - 4   // CRC
+                            - 2;  // separatore
 
-// split SOLO della stringa Base64
+            // split SOLO della stringa Base64
             List<String> payloadChunks =
                     splitString(fullEncoded, maxPayloadLen);
 
@@ -2539,15 +2678,15 @@ public class TxForegroundService extends Service {
                     "chunks=" + payloadChunks.size() +
                             " totalLen=" + fullEncoded.length());
 
-// ================================
-// 🚀 COSTRUZIONE SMS
-// ================================
+            // ================================
+            // 🚀 COSTRUZIONE SMS
+            // ================================
 
             for (int i = 0; i < payloadChunks.size(); i++) {
 
                 String payloadChunk = payloadChunks.get(i);
 
-                int seq = globalSequence++;
+                int seq = i;
 
                 boolean isFinal =
                         isRealFinalFlush &&
@@ -2558,7 +2697,8 @@ public class TxForegroundService extends Service {
                 String header =
                         "TX|" +
                                 currentSessionId + "|" +
-                                seq + "|" +
+                                segment.segmentId + "|" +
+                                seq + "/" + payloadChunks.size() + "|" +
                                 type + "|";
 
                 String full = header + payloadChunk;
@@ -2602,10 +2742,7 @@ public class TxForegroundService extends Service {
             // ================================
             enqueueSmsBatch(parts, isRealFinalFlush);
             firstBlockSent = true;
-            lastSentPointIndex = fullTrackHistory.size();
 
-            Log.d("TX_FLOW",
-                    "lastSentPointIndex=" + lastSentPointIndex);
             // ================================
             // 🔥 RESET SOLO SE F REALE
             // ================================
