@@ -33,6 +33,7 @@ import androidx.appcompat.app.AlertDialog
 import android.util.Log
 import android.net.Uri
 import java.io.OutputStream
+import android.os.SystemClock
 
 
 
@@ -42,6 +43,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var txtCount: TextView
     private lateinit var txtLast: TextView
     private lateinit var googleMap: GoogleMap
+
+    private var lastSnapshotTime = 0L
 
     private var mapReady = false
     private var receiverRegistered = false
@@ -65,6 +68,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     private val emergencyPoints = mutableListOf<LatLng>()
 
     private val rxAssembler = RxTrackAssembler()
+    private var snapshotInProgress = false
 
 
 
@@ -325,6 +329,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     override fun onDestroy() {
+        snapshotInProgress = false
         super.onDestroy()
         if (receiverRegistered) unregisterReceiver(smsReceiver)
     }
@@ -362,7 +367,16 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         // OVERLAY MAPTILER
         // =====================================
         if (selectedMapProvider == "MAPTILER") {
+
             enableMapTilerOverlay()
+
+            Handler(Looper.getMainLooper()).postDelayed({
+
+                if (trackPoints.isNotEmpty()) {
+                    drawAllPoints()
+                }
+
+            }, 800)
         }
     }
 
@@ -387,7 +401,23 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         } else {
 
-            trackPolyline?.points = trackPoints
+            try {
+
+                trackPolyline?.points = trackPoints
+
+            } catch (e: Exception) {
+
+                Log.e("DRAW_TRACK", "Polyline update failed", e)
+
+                trackPolyline?.remove()
+
+                trackPolyline = googleMap.addPolyline(
+                    PolylineOptions()
+                        .addAll(trackPoints)
+                        .width(6f)
+                        .color(Color.BLACK)
+                )
+            }
         }
 
         // =========================
@@ -451,6 +481,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun updateEmergencyMarkers() {
 
+        if (!mapReady) return
         emergencyMarkers.forEach { it.remove() }
         emergencyMarkers.clear()
 
@@ -553,6 +584,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
         trackPoints.clear()
         trackPolyline?.remove()
         lastMarker?.remove()
+        trackPolyline = null
+        lastMarker = null
         manualPoints.clear()
         emergencyPoints.clear()
 
@@ -621,6 +654,24 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun generateFinalSnapshot() {
 
+        if (snapshotInProgress) {
+            Log.e("SNAPSHOT", "Snapshot già in corso")
+            return
+        }
+
+        val now = SystemClock.elapsedRealtime()
+
+        if (now - lastSnapshotTime < 10000) {
+
+            Log.e("SNAPSHOT", "Snapshot troppo ravvicinate")
+
+            return
+        }
+
+        lastSnapshotTime = now
+
+        snapshotInProgress = true
+
         if (!mapReady || trackPoints.isEmpty()) return
 
         try {
@@ -641,6 +692,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                     override fun onFinish() {
 
                         Log.d("SNAPSHOT", "CAMERA FINISHED")
+                        drawAllPoints()
 
                         googleMap.setOnMapLoadedCallback {
 
@@ -649,7 +701,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
                             // 🔥 EXTRA WAIT MAPTILER
                             val extraDelay =
                                 if (selectedMapProvider == "MAPTILER")
-                                    5000L
+                                    8000L
                                 else
                                     1200L
 
@@ -677,6 +729,8 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         } catch (e: Exception) {
 
+            snapshotInProgress = false
+
             Log.e("SNAPSHOT", "generateFinalSnapshot error", e)
         }
     }
@@ -685,8 +739,22 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
 
         googleMap.snapshot { originalBitmap ->
 
-            if (originalBitmap == null) return@snapshot
-            if (trackPoints.isEmpty()) return@snapshot
+            if (originalBitmap == null) {
+
+                snapshotInProgress = false
+
+                Log.e("SNAPSHOT", "Bitmap NULL")
+
+                return@snapshot
+            }
+            if (trackPoints.isEmpty()) {
+
+                snapshotInProgress = false
+
+                Log.e("SNAPSHOT", "Track vuota")
+
+                return@snapshot
+            }
 
             val bitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(bitmap)
@@ -889,6 +957,7 @@ class RxActivity : AppCompatActivity(), OnMapReadyCallback {
             // SAVE
             // =====================================================
             saveFinalBitmap(bitmap)
+            snapshotInProgress = false
         }
     }
 

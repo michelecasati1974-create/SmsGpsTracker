@@ -1,3 +1,4 @@
+// RxMultiTrackAssembler.kt
 package com.example.smsgpstracker.rxmulti
 
 import android.util.Base64
@@ -22,6 +23,8 @@ class RxMultiTrackAssembler {
 
         var completed: Boolean = false,
 
+        var rebuildDone: Boolean = false,
+
         var lastUpdate: Long =
             System.currentTimeMillis()
     )
@@ -41,15 +44,15 @@ class RxMultiTrackAssembler {
         var lastPoint:
         Pair<Double, Double>? = null,
 
-        var finalReceived: Boolean = false
+        var finalReceived: Boolean = false,
+
+        var finalSegmentId: Long = -1L
     )
 
     // =====================================================
 
     private val sessions =
         ConcurrentHashMap<String, SessionBuffer>()
-
-    private var currentSessionId: String? = null
 
     // =====================================================
     // PROCESS
@@ -65,15 +68,25 @@ class RxMultiTrackAssembler {
         val segmentId =
             packet.segmentId
 
-        currentSessionId = sessionId
-
         val session =
             sessions.getOrPut(sessionId) {
+
+                Log.e(
+                    "ASM_SESSION",
+                    "NEW SESSION $sessionId"
+                )
+
                 SessionBuffer()
             }
 
         val segment =
             session.segments.getOrPut(segmentId) {
+
+                Log.e(
+                    "ASM_SEGMENT",
+                    "NEW SEGMENT $segmentId"
+                )
+
                 SegmentBuffer()
             }
 
@@ -81,7 +94,7 @@ class RxMultiTrackAssembler {
             System.currentTimeMillis()
 
         // =================================================
-        // DUPLICATI
+        // DUPLICATE PROTECTION
         // =================================================
 
         if (segment.chunks.containsKey(packet.seq)) {
@@ -104,15 +117,20 @@ class RxMultiTrackAssembler {
         segment.totalChunks =
             packet.total
 
+        // =================================================
+        // FINAL FLAG
+        // =================================================
+
         if (packet.type == "F") {
 
             segment.finalReceived = true
 
-            session.finalReceived = true
+            session.finalSegmentId =
+                segmentId
 
             Log.e(
                 "ASM_FINAL",
-                "FINAL segment=$segmentId"
+                "FINAL FLAG segment=$segmentId"
             )
         }
 
@@ -126,17 +144,33 @@ class RxMultiTrackAssembler {
         // =================================================
 
         if (!isSegmentComplete(segment)) {
+
+            Log.d(
+                "ASM_WAIT",
+                "segment=$segmentId incomplete"
+            )
+
             return
         }
 
-        // evita rebuild multipli
-        if (segment.completed) {
+        // =================================================
+        // REBUILD ONLY ONCE
+        // =================================================
+
+        if (segment.rebuildDone) {
+
+            Log.d(
+                "ASM_SKIP",
+                "segment=$segmentId already rebuilt"
+            )
+
             return
         }
 
-        segment.completed = true
+        segment.rebuildDone = true
 
         rebuildSegment(
+            sessionId,
             session,
             segmentId,
             segment
@@ -152,6 +186,7 @@ class RxMultiTrackAssembler {
     ): Boolean {
 
         if (segment.totalChunks <= 0) {
+
             return false
         }
 
@@ -176,6 +211,7 @@ class RxMultiTrackAssembler {
     // =====================================================
 
     private fun rebuildSegment(
+        sessionId: String,
         session: SessionBuffer,
         segmentId: Long,
         segment: SegmentBuffer
@@ -187,14 +223,25 @@ class RxMultiTrackAssembler {
                 StringBuilder()
 
             // =============================================
-            // RIORDINO
+            // ORDER CHUNKS
             // =============================================
 
             for (i in 0 until segment.totalChunks) {
 
-                builder.append(
+                val chunk =
                     segment.chunks[i]
-                )
+
+                if (chunk == null) {
+
+                    Log.e(
+                        "ASM_NULL",
+                        "NULL chunk seq=$i"
+                    )
+
+                    return
+                }
+
+                builder.append(chunk)
             }
 
             val fullBase64 =
@@ -205,8 +252,13 @@ class RxMultiTrackAssembler {
                 "segment=$segmentId len=${fullBase64.length}"
             )
 
+            Log.e(
+                "ASM_SEGMENTS",
+                "session=$sessionId segments=${session.segments.keys.sorted()}"
+            )
+
             // =============================================
-            // BASE64 FULL DECODE
+            // BASE64 DECODE
             // =============================================
 
             val decodedBytes =
@@ -221,6 +273,11 @@ class RxMultiTrackAssembler {
                     Charsets.UTF_8
                 )
 
+            Log.d(
+                "ASM_POLY",
+                "polylineLen=${encodedPolyline.length}"
+            )
+
             // =============================================
             // POLYLINE DECODE
             // =============================================
@@ -230,15 +287,41 @@ class RxMultiTrackAssembler {
                     encodedPolyline
                 )
 
+            if (points.isEmpty()) {
+
+                Log.e(
+                    "ASM_EMPTY",
+                    "decoded points EMPTY"
+                )
+
+                return
+            }
+
             appendPoints(
                 session,
                 points
             )
 
+            segment.completed = true
+
             Log.e(
                 "ASM_OK",
                 "segment=$segmentId points=${points.size}"
             )
+
+            // =============================================
+            // FINAL COMPLETE
+            // =============================================
+
+            if (segment.finalReceived) {
+
+                session.finalReceived = true
+
+                Log.e(
+                    "ASM_FINAL_OK",
+                    "FINAL TRACK COMPLETE"
+                )
+            }
 
         } catch (e: Exception) {
 
@@ -247,6 +330,8 @@ class RxMultiTrackAssembler {
                 "segment=$segmentId",
                 e
             )
+
+            segment.rebuildDone = false
         }
     }
 
@@ -260,6 +345,7 @@ class RxMultiTrackAssembler {
     ) {
 
         if (newPoints.isEmpty()) {
+
             return
         }
 
@@ -268,6 +354,10 @@ class RxMultiTrackAssembler {
 
         var lastLocal:
                 Pair<Double, Double>? = null
+
+        // =================================================
+        // LOCAL DEDUP
+        // =================================================
 
         for (p in newPoints) {
 
@@ -289,9 +379,14 @@ class RxMultiTrackAssembler {
             lastLocal = p
         }
 
-        // =============================================
-        // DEDUP GLOBALE
-        // =============================================
+        Log.e(
+            "ASM_APPEND_DEBUG",
+            "before=${session.fullTrack.size} add=${cleaned.size}"
+        )
+
+        // =================================================
+        // GLOBAL DEDUP
+        // =================================================
 
         for (p in cleaned) {
 
@@ -300,8 +395,12 @@ class RxMultiTrackAssembler {
 
             if (
                 last != null &&
-                kotlin.math.abs(last.first - p.first) < 1e-6 &&
-                kotlin.math.abs(last.second - p.second) < 1e-6
+                kotlin.math.abs(
+                    last.first - p.first
+                ) < 1e-6 &&
+                kotlin.math.abs(
+                    last.second - p.second
+                ) < 1e-6
             ) {
 
                 continue
@@ -314,6 +413,11 @@ class RxMultiTrackAssembler {
             session.fullTrack.lastOrNull()
 
         Log.e(
+            "ASM_APPEND_DEBUG",
+            "after=${session.fullTrack.size}"
+        )
+
+        Log.e(
             "ASM_APPEND",
             "total=${session.fullTrack.size}"
         )
@@ -323,12 +427,9 @@ class RxMultiTrackAssembler {
     // GET TRACK
     // =====================================================
 
-    fun getFullTrack():
-            List<Pair<Double, Double>> {
-
-        val sessionId =
-            currentSessionId
-                ?: return emptyList()
+    fun getFullTrack(
+        sessionId: String
+    ): List<Pair<Double, Double>> {
 
         val session =
             sessions[sessionId]
@@ -341,18 +442,21 @@ class RxMultiTrackAssembler {
     // FINAL TRACK
     // =====================================================
 
-    fun buildFinalTrack():
-            List<Pair<Double, Double>>? {
-
-        val sessionId =
-            currentSessionId
-                ?: return null
+    fun buildFinalTrack(
+        sessionId: String
+    ): List<Pair<Double, Double>>? {
 
         val session =
             sessions[sessionId]
                 ?: return null
 
         if (!session.finalReceived) {
+
+            Log.w(
+                "ASM_FINAL_WAIT",
+                "final not received"
+            )
+
             return null
         }
 
@@ -363,11 +467,9 @@ class RxMultiTrackAssembler {
     // COMPLETE
     // =====================================================
 
-    fun isComplete(): Boolean {
-
-        val sessionId =
-            currentSessionId
-                ?: return false
+    fun isComplete(
+        sessionId: String
+    ): Boolean {
 
         val session =
             sessions[sessionId]
@@ -390,7 +492,8 @@ class RxMultiTrackAssembler {
 
         while (iterator.hasNext()) {
 
-            val entry = iterator.next()
+            val entry =
+                iterator.next()
 
             val session =
                 entry.value
@@ -406,9 +509,10 @@ class RxMultiTrackAssembler {
                     )
             }
 
+            // 🔥 12 ORE
             if (
                 newest > 0 &&
-                now - newest > 5 * 60 * 1000
+                now - newest > 12 * 60 * 60 * 1000
             ) {
 
                 Log.w(
@@ -422,12 +526,12 @@ class RxMultiTrackAssembler {
     }
 
     // =====================================================
+    // RESET
+    // =====================================================
 
     fun reset() {
 
         sessions.clear()
-
-        currentSessionId = null
 
         Log.e(
             "ASM_RESET",

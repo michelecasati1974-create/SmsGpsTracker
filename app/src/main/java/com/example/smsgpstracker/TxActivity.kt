@@ -123,10 +123,7 @@ class TxActivity : AppCompatActivity() {
                 updateGpsUi(lat, lon, acc)
             }
 
-            if (intent.hasExtra("signalDbm") && currentStatus != TxStatus.IDLE) {
-                val dbm = intent.getIntExtra("signalDbm", -150)
-                updateSignalUi(dbm, NetworkState.ONLINE)
-            }
+
         }
     }
 
@@ -500,7 +497,11 @@ class TxActivity : AppCompatActivity() {
             val type = intent.getStringExtra("type")
             val stateStr = intent.getStringExtra("state")
 
-            val state = NetworkState.valueOf(stateStr!!)
+            val state = try {
+                NetworkState.valueOf(stateStr ?: "NO_SIGNAL")
+            } catch (e: Exception) {
+                NetworkState.NO_SIGNAL
+            }
 
             // ✅ aggiorna UI nuova
             updateNetworkUI(dbm, type, state)
@@ -718,6 +719,10 @@ class TxActivity : AppCompatActivity() {
     }
 
     private fun resetSystemUi() {
+
+        txtNetworkType.text = "--"
+        txtNetworkState.text = "--"
+        txtSignalDbm.text = "-- dBm"
 
         // GPS
         txtGpsInfo.text = "--"

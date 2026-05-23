@@ -63,6 +63,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
     private var emergencyBlink = false
     private val manualMarkers = mutableListOf<Marker>()
     private var firstCameraMove = true
+    private var finalTrackHandled = false
 
 
 
@@ -198,6 +199,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                             "RX_SESSION",
                             "NUOVA SESSIONE → RESET COMPLETO old=$previousSession new=${packet.sessionId}"
                         )
+                        finalTrackHandled = false
 
                         // =========================
                         // RESET TRACK
@@ -239,7 +241,10 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     // =========================
                     // REALTIME TRACK UPDATE
                     // =========================
-                    val liveTrack = multiAssembler.getFullTrack()
+                    val liveTrack =
+                        multiAssembler.getFullTrack(
+                            packet.sessionId
+                        )
 
                     if (liveTrack.isNotEmpty()) {
 
@@ -265,44 +270,88 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
 
                     // =========================
-                    // 🏁 CHIUSURA SU F (ROBUSTA)
+                    // 🏁 TRACK COMPLETA (ROBUSTA)
                     // =========================
-                    if (packet.type == "F") {
+                    if (
+                        multiAssembler.isComplete(
+                            packet.sessionId
+                        ) &&
+                        !finalTrackHandled
+                    ) {
+
+                        finalTrackHandled = true
 
                         Log.e(
                             "RX_FINAL",
-                            "FINAL RX seg=${packet.segmentId} seq=${packet.seq}"
+                            "TRACK COMPLETA seg=${packet.segmentId}"
                         )
 
-                        val finalTrack = multiAssembler.buildFinalTrack()
+                        val finalTrack =
+                            multiAssembler.buildFinalTrack(
+                                packet.sessionId
+                            )
 
                         if (!finalTrack.isNullOrEmpty()) {
 
+                            // =====================================
+                            // SAVE REPOSITORY
+                            // =====================================
                             RxMultiTrackRepository.points.clear()
 
-                            RxMultiTrackRepository.points.addAll(finalTrack)
+                            RxMultiTrackRepository.points.addAll(
+                                finalTrack
+                            )
 
+                            // =====================================
+                            // UPDATE UI TRACK
+                            // =====================================
                             trackPoints.clear()
 
                             trackPoints.addAll(
                                 finalTrack.map {
-                                    LatLng(it.first, it.second)
+                                    LatLng(
+                                        it.first,
+                                        it.second
+                                    )
                                 }
                             )
 
+                            // =====================================
+                            // DRAW FINALE
+                            // =====================================
                             if (mapReady) {
-                                drawAllPoints()
+
+                                try {
+
+                                    drawAllPoints()
+
+                                } catch (e: Exception) {
+
+                                    Log.e(
+                                        "RX_FINAL",
+                                        "drawAllPoints failed",
+                                        e
+                                    )
+                                }
                             }
 
                             txtStatus.text =
                                 "Tracking completato (${finalTrack.size} punti)"
 
-                            // =========================
+                            txtCount.text =
+                                "Punti: ${finalTrack.size}"
+
+                            // =====================================
                             // SNAPSHOT FINALE
-                            // =========================
+                            // =====================================
                             Handler(mainLooper).postDelayed({
 
                                 try {
+
+                                    Log.e(
+                                        "RX_SNAPSHOT",
+                                        "START FINAL SNAPSHOT"
+                                    )
 
                                     generateFinalSnapshot()
 
@@ -321,24 +370,35 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                             Log.e(
                                 "RX_FINAL",
-                                "FINAL ricevuto ma track vuota"
+                                "Track finale vuota"
                             )
 
                             txtStatus.text =
-                                "Finale ricevuto ma track incompleta"
+                                "Track incompleta"
                         }
 
-                        // =========================
+                        // =====================================
                         // RESET RITARDATO
-                        // =========================
+                        // =====================================
                         Handler(mainLooper).postDelayed({
 
-                            Log.e(
-                                "RX_FINAL",
-                                "AUTO RESET assembler"
-                            )
+                            try {
 
-                            multiAssembler.reset()
+                                Log.e(
+                                    "RX_FINAL",
+                                    "AUTO RESET assembler"
+                                )
+
+                                multiAssembler.reset()
+
+                            } catch (e: Exception) {
+
+                                Log.e(
+                                    "RX_FINAL",
+                                    "RESET FAILED",
+                                    e
+                                )
+                            }
 
                         }, 20000)
 
@@ -420,7 +480,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
             trackPoints.clear()
             RxMultiTrackRepository.points.clear()
-            RxMultiTrackRepository.currentSessionId = null
+            //RxMultiTrackRepository.currentSessionId = null
             multiAssembler.reset()
 
         } else {
@@ -553,8 +613,12 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
         // EMERGENCY
 
         emergencyPoints.clear()
+
+        emergencyPoints.addAll(
+            RxMultiExtraRepository.emergency
+        )
+
         updateEmergencyMarkers()
-        emergencyPoints.addAll(RxMultiExtraRepository.emergency)
 
         if (selectedMapProvider == "MAPTILER") {
 

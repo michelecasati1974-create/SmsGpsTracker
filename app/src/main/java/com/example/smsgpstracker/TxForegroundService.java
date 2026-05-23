@@ -42,13 +42,7 @@ import android.app.Activity;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class TxForegroundService extends Service {
-    public enum SignalLevel {
-        EXCELLENT,
-        GOOD,
-        WEAK,
-        CRITICAL,
-        NO_SIGNAL
-    }
+
     public enum NetworkState {
         ONLINE,
         WEAK_SIGNAL,
@@ -63,7 +57,19 @@ public class TxForegroundService extends Service {
     // ================================
     // 📦 QUEUE + STATO
     // ================================
-    private final Queue<SmsBatch> smsQueue = new LinkedList<>();
+    private final Queue<SmsBatch> smsQueue =
+            new LinkedList<>();
+
+    private static final int MAX_SMS_RETRY = 3;
+
+    private final ConcurrentHashMap<String, Integer> retryMap =
+            new ConcurrentHashMap<>();
+
+    private static final int MAX_QUEUE_SIZE = 100;
+
+    private static final int MAX_PENDING_SEGMENTS = 100;
+
+    private static final long TX_QUEUE_TIMEOUT_MS = 120000;
 
     private final AtomicLong nextPointId =
             new AtomicLong(1);
@@ -166,14 +172,39 @@ public class TxForegroundService extends Service {
     private final Object bufferLock = new Object();
     private long multiSendIntervalMs;
     private boolean sessionWasMultiGps = false;
+    private final Object txQueueLock = new Object();
+
+    private final AtomicBoolean serviceStopping =
+            new AtomicBoolean(false);
+
+    private final AtomicBoolean destroyCalled =
+            new AtomicBoolean(false);
+
+    private final AtomicBoolean finalFlushExecuting =
+            new AtomicBoolean(false);
+
+    private final AtomicBoolean queueProcessing =
+            new AtomicBoolean(false);
+
+    private final AtomicBoolean trackLoopActive =
+            new AtomicBoolean(false);
+
     private static class SmsBatch {
 
         List<String> parts;
-        boolean isFinal;
+        boolean finalBatch;
+        String sessionId;
+        long createdAt;
 
-        SmsBatch(List<String> parts, boolean isFinal) {
+        SmsBatch(
+                List<String> parts,
+                boolean finalBatch,
+                String sessionId
+        ) {
             this.parts = parts;
-            this.isFinal = isFinal;
+            this.finalBatch = finalBatch;
+            this.sessionId = sessionId;
+            this.createdAt = System.currentTimeMillis();
         }
     }
 
@@ -195,9 +226,6 @@ public class TxForegroundService extends Service {
 
         List<TrackPointEx> points;
     }
-
-
-
 
     // =======================
     // SMS PROTOCOLLO
@@ -251,93 +279,189 @@ public class TxForegroundService extends Service {
             noSignalStartTime = 0;
         }
     }
-    private final BroadcastReceiver smsSentReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            int retry = intent.getIntExtra("retry", 0);
-            if (getResultCode() == Activity.RESULT_OK) {
-                Log.d("SMS_SEND", "OK");
-                onSingleSmsSentSuccess();
-            } else {
-                Log.w("SMS_SEND", "FAILED → retry=" + retry);
-                handleRetry();
-            }
-            // 🔥 UNREGISTER SICURO (ANTI-CRASH)
-            try {
-                if (smsReceiverRegistered) {
-                    unregisterReceiver(this);
-                    smsReceiverRegistered = false;
+    private final BroadcastReceiver smsSentReceiver =
+            new BroadcastReceiver() {
+
+                @Override
+                public void onReceive(
+                        Context context,
+                        Intent intent
+                ) {
+
+                    try {
+
+                        String retryKey =
+                                intent.getStringExtra(
+                                        "retryKey"
+                                );
+
+                        int result =
+                                getResultCode();
+
+                        if (result == Activity.RESULT_OK) {
+
+                            Log.d("SMS_SENT",
+                                    "SUCCESS " + retryKey);
+
+                        } else {
+
+                            Log.e("SMS_SENT",
+                                    "FAILED code=" + result +
+                                            " key=" + retryKey);
+                        }
+
+                    } catch (Exception e) {
+
+                        Log.e("SMS_SENT",
+                                "receiver error",
+                                e);
+                    }
                 }
-            } catch (Exception e) {
-                Log.w("SMS_SEND", "Receiver already unregistered");
-            }
-        }
-    };
+            };
     private void processNextBatch() {
 
-        synchronized (smsLock) {
+        Log.e(
+                "BATCH_TRACE",
+                "ENTER processNextBatch " +
+                        "queueSize=" + smsQueue.size() +
+                        " isSending=" + isSending +
+                        " stopPending=" + stopPending +
+                        " finalFlush=" + isFinalFlush
+        );
 
-            if (isSending) {
+        synchronized (txQueueLock) {
 
-                Log.d("SMS_QUEUE", "ALREADY SENDING");
+            if (queueProcessing.get()) {
                 return;
             }
 
-            if (smsQueue.isEmpty()) {
-
-                Log.d("SMS_QUEUE", "QUEUE EMPTY");
-                return;
-            }
-
-            // ================================
-            // 🔥 PRELEVA BATCH COMPLETO
-            // ================================
             SmsBatch batch = smsQueue.poll();
 
             if (batch == null) {
-
-                Log.e("SMS_QUEUE", "BATCH NULL");
                 return;
             }
 
-            // ================================
-            // 🔥 DATI BATCH
-            // ================================
-            currentBatch = batch.parts;
+            queueProcessing.set(true);
 
-            // 🔥 IMPORTANTISSIMO
-            currentBatchFinal = batch.isFinal;
+            Log.d("SMS_QUEUE",
+                    "PROCESS batch final=" + batch.finalBatch);
 
-            currentIndex = 0;
-            currentRetry = 0;
+            txHandler.post(() -> {
 
-            isSending = true;
+                try {
 
-            Log.e("SMS_QUEUE",
-                    "START BATCH size=" + currentBatch.size() +
-                            " final=" + currentBatchFinal);
+                    sendNextPart(
+                            batch.parts,
+                            0,
+                            batch.sessionId,
+                            batch.finalBatch
+                    );
+
+                } catch (Exception e) {
+
+                    Log.e("SMS_QUEUE",
+                            "PROCESS ERROR",
+                            e);
+
+                }
+            });
         }
 
-        // ================================
-        // 🚀 INVIO PRIMO SMS
-        // ================================
-        sendCurrentSms();
+        Log.e(
+                "STOP_TRACE",
+                "processNextBatch EXIT " +
+                        " isProcessing=" + isProcessing +
+                        " stopPending=" + stopPending +
+                        " isFinalFlush=" + isFinalFlush +
+                        " finalSmsSent=" + finalSmsSent
+        );
     }
-    private void enqueueSmsBatch(List<String> parts, boolean isFinal) {
 
-        synchronized (smsLock) {
+// ================================
+// 🔥 TX CLEANUP
+// ================================
 
-            smsQueue.add(new SmsBatch(parts, isFinal));
+    private void clearTxQueues() {
+
+        synchronized (txQueueLock) {
+
+            smsQueue.clear();
+        }
+
+        retryMap.clear();
+
+        pendingSegments.clear();
+    }
+
+// ================================
+// 🔥 SESSION RESET
+// ================================
+
+    private void resetSessionRuntime() {
+
+        finalSmsSent = false;
+
+        isFinalFlush = false;
+
+        finalFlushStarted.set(false);
+
+        finalFlushExecuting.set(false);
+
+        queueProcessing.set(false);
+
+        serviceStopping.set(false);
+
+        destroyCalled.set(false);
+
+        firstBlockSent = false;
+
+        lastTrackSmsTime = 0;
+
+        smsLogSaved = false;
+    }
+    private void enqueueSmsBatch(
+            List<String> parts,
+            boolean isFinal
+    ) {
+
+        if (parts == null || parts.isEmpty()) {
 
             Log.e("SMS_QUEUE",
-                    "ENQUEUE batch size=" + parts.size() +
-                            " final=" + isFinal);
+                    "enqueue aborted → empty batch");
 
-            if (!isSending) {
+            return;
+        }
+
+        synchronized (txQueueLock) {
+
+            if (smsQueue.size() > MAX_QUEUE_SIZE) {
+
+                Log.e("SMS_QUEUE",
+                        "QUEUE OVERFLOW → clear");
+
+                smsQueue.clear();
+            }
+
+            SmsBatch batch = new SmsBatch(
+                    new ArrayList<>(parts),
+                    isFinal,
+                    currentSessionId
+            );
+
+            smsQueue.add(batch);
+
+            Log.d("SMS_QUEUE",
+                    "ENQUEUE batch size=" + parts.size() +
+                            " final=" + isFinal +
+                            " queue=" + smsQueue.size());
+
+            if (!queueProcessing.get()) {
+
                 processNextBatch();
             }
         }
     }
+
     private void onSingleSmsSentSuccess() {
         boolean batchCompleted = false;
         synchronized (smsLock) {
@@ -504,23 +628,54 @@ public class TxForegroundService extends Service {
         }
     }
     private String getNetworkType() {
+
         try {
-            if (ActivityCompat.checkSelfPermission(this,
+
+            if (ActivityCompat.checkSelfPermission(
+                    this,
                     Manifest.permission.READ_PHONE_STATE)
                     != PackageManager.PERMISSION_GRANTED) {
 
-                return "NO PERM";
+                return "--";
             }
+
             int type = telephonyManager.getDataNetworkType();
-            switch (type) {
-                case TelephonyManager.NETWORK_TYPE_LTE: return "LTE";
-                case TelephonyManager.NETWORK_TYPE_NR: return "5G";
-                case TelephonyManager.NETWORK_TYPE_HSPA: return "HSPA";
-                case TelephonyManager.NETWORK_TYPE_EDGE: return "EDGE";
-                default: return "UNKNOWN";
+
+            // fallback VOCE
+            if (type == TelephonyManager.NETWORK_TYPE_UNKNOWN) {
+                type = telephonyManager.getVoiceNetworkType();
             }
+
+            switch (type) {
+
+                case TelephonyManager.NETWORK_TYPE_GPRS:
+                    return "GPRS";
+
+                case TelephonyManager.NETWORK_TYPE_EDGE:
+                    return "EDGE";
+
+                case TelephonyManager.NETWORK_TYPE_UMTS:
+                    return "UMTS";
+
+                case TelephonyManager.NETWORK_TYPE_HSPA:
+                    return "HSPA";
+
+                case TelephonyManager.NETWORK_TYPE_LTE:
+                    return "LTE";
+
+                case TelephonyManager.NETWORK_TYPE_NR:
+                    return "5G";
+
+                case TelephonyManager.NETWORK_TYPE_GSM:
+                    return "GSM";
+
+                default:
+                    return "Rete registrata";
+            }
+
         } catch (Exception e) {
-            return "ERR";
+
+            return "--";
         }
     }
     ///////Nuovi parametri configurabili (Settings)/////
@@ -831,26 +986,76 @@ public class TxForegroundService extends Service {
         );
     }
     private Handler trackHandler = new Handler(Looper.getMainLooper());
-    private final Runnable trackProcessorRunnable = new Runnable() {
-        @Override
-        public void run() {
+    private final Runnable trackProcessorRunnable =
+            new Runnable() {
 
-            if (!isRunning || !multiGpsMode) return;
+                @Override
+                public void run() {
 
-            processTrackBuffer();
+                    try {
 
-            if (isFinalFlush) {
-                Log.e("STOP_DEBUG", "FINAL FLUSH TRIGGERED (RUNNABLE)");
-            }
+                        if (!isRunning) {
+                            trackRunnableScheduled = false;
+                            return;
+                        }
 
-            // 🔴 STOP DOPO FINALE
-            if (isRunning && multiGpsMode && !finalSmsSent) {
-                trackHandler.postDelayed(this, multiGpsSendIntervalMs);
-            } else {
-                Log.d("TRACK", "Runnable STOPPED");
-            }
-        }
-    };
+                        if (!multiGpsMode) {
+                            trackRunnableScheduled = false;
+                            return;
+                        }
+
+                        if (serviceStopping.get()) {
+                            trackRunnableScheduled = false;
+                            return;
+                        }
+
+                        if (trackLoopActive.get()) {
+
+                            Log.w("TRACK_LOOP",
+                                    "SKIP → previous processing still active");
+
+                            trackHandler.postDelayed(
+                                    this,
+                                    multiGpsSendIntervalMs
+                            );
+
+                            return;
+                        }
+
+                        trackLoopActive.set(true);
+
+                        processTrackBuffer();
+                        Log.e(
+                                "STOP_TRACE",
+                                "processTrackBuffer DONE"
+                        );
+
+                    } catch (Exception e) {
+
+                        Log.e("TRACK_LOOP",
+                                "Runnable exception",
+                                e);
+
+                    } finally {
+
+                        trackLoopActive.set(false);
+
+                        if (isRunning &&
+                                multiGpsMode &&
+                                !serviceStopping.get()) {
+
+                            trackHandler.postDelayed(
+                                    this,
+                                    multiGpsSendIntervalMs
+                            );
+
+                        } else {
+
+                            trackRunnableScheduled = false;
+                        }
+                    }
+                }
+            };
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 
@@ -1021,37 +1226,61 @@ public class TxForegroundService extends Service {
         //--------------------------------
         if (ACTION_STOP.equals(action)) {
 
-            Log.e("STOP_FLOW",
-                    "ENTER ACTION_STOP",
-                    new Exception());
-
-            Log.e("STOP_DEBUG", "ACTION_STOP RECEIVED");
-
-            Log.d("TX_SERVICE", "STOP ACTION RECEIVED");
+            Log.e(
+                    "STOP_TRACE",
+                    "ACTION_STOP ENTER " +
+                            "multiGpsMode=" + multiGpsMode +
+                            " sessionWasMultiGps=" + sessionWasMultiGps +
+                            " stopPending=" + stopPending +
+                            " finalFlushStarted=" + finalFlushStarted.get() +
+                            " isFinalFlush=" + isFinalFlush
+            );
 
             sessionEndTime = System.currentTimeMillis();
 
             // ================================
             // 🔥 MULTIGPS → FINAL FLUSH
             // ================================
-            if (multiGpsMode) {
+
+            if (multiGpsMode || sessionWasMultiGps) {
 
                 if (!finalFlushStarted.compareAndSet(false, true)) {
-                    Log.w("TRACK", "STOP IGNORATO → final flush già avviato");
+
+                    Log.w(
+                            "TRACK",
+                            "STOP IGNORATO → final flush già avviato"
+                    );
+
                     return START_NOT_STICKY;
                 }
 
-                Log.d("TRACK", "STOP → FINAL FLUSH START");
+                Log.d(
+                        "TRACK",
+                        "STOP → FINAL FLUSH START"
+                );
 
-                stopPending = true; // 🔥 NUOVO
+                stopPending = true;
 
-                setFinalFlush(true, "ACTION_STOP");
+                setFinalFlush(
+                        true,
+                        "ACTION_STOP"
+                );
+                Log.e(
+                        "STOP_TRACE",
+                        "FINAL FLUSH FLAG SET"
+                );
 
                 processTrackBuffer();
+                Log.e(
+                        "STOP_TRACE",
+                        "processTrackBuffer DONE"
+                );
+
                 // 🔥 FORZA PARTENZA INVIO
                 processNextBatch();
 
-                return START_NOT_STICKY; // 🔥 ESCI QUI
+                return START_STICKY;
+
             } else {
 
                 // ================================
@@ -1156,33 +1385,124 @@ public class TxForegroundService extends Service {
     }
     private void restoreStateOrStop() {
 
-        SharedPreferences prefs = getSharedPreferences("TX_STATE", MODE_PRIVATE);
+        SharedPreferences prefs =
+                getSharedPreferences(
+                        "TX_STATE",
+                        MODE_PRIVATE
+                );
 
-        boolean wasRunning = prefs.getBoolean("wasRunning", false);
+        boolean wasRunning =
+                prefs.getBoolean(
+                        "wasRunning",
+                        false
+                );
 
         if (!wasRunning) {
-            Log.e("SERVICE", "No active session → stopSelf()");
+
+            Log.e(
+                    "SERVICE",
+                    "No active session → stopSelf()"
+            );
+
             stopSelf();
+
             return;
         }
 
-        Log.e("SERVICE", "🔥 RIPRISTINO SESSIONE");
+        Log.e(
+                "SERVICE",
+                "🔥 RIPRISTINO SESSIONE"
+        );
 
-        currentSessionId = prefs.getString("sessionId", generateSessionId());
+        // =====================================
+        // RIPRISTINO SESSIONE
+        // =====================================
 
-        finalFlushStarted.set(false);
-        finalSmsSent = false;
-        isFinalFlush = false;
+        currentSessionId =
+                prefs.getString(
+                        "sessionId",
+                        generateSessionId()
+                );
+
+        // =====================================
+        // RIPRISTINO MODALITÀ
+        // =====================================
+
+        multiGpsMode =
+                prefs.getBoolean(
+                        "multiGpsMode",
+                        false
+                );
+
+        continuousMode =
+                prefs.getBoolean(
+                        "continuousMode",
+                        false
+                );
+
+        sessionWasMultiGps =
+                prefs.getBoolean(
+                        "sessionWasMultiGps",
+                        false
+                );
+
+        sessionType =
+                prefs.getString(
+                        "sessionType",
+                        "UNKNOWN"
+                );
+
+        multiGpsSendIntervalMs =
+                prefs.getLong(
+                        "multiGpsSendIntervalMs",
+                        15000
+                );
+
+        Log.e(
+                "SERVICE_RESTORE",
+                "session=" + currentSessionId +
+                        " multi=" + multiGpsMode +
+                        " cont=" + continuousMode +
+                        " wasMulti=" + sessionWasMultiGps +
+                        " type=" + sessionType
+        );
+
+        // =====================================
+        // RESET RUNTIME
+        // =====================================
+
+        resetSessionRuntime();
 
         isRunning = true;
 
-        // 🔥 fondamentale
-        trackRunnableScheduled = false;
-        trackHandler.removeCallbacks(trackProcessorRunnable);
+        // =====================================
+        // STOP CALLBACK VECCHI
+        // =====================================
 
-        if (multiGpsMode) {
-            trackRunnableScheduled = true;
-            trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
+        trackHandler.removeCallbacksAndMessages(null);
+
+        trackRunnableScheduled = false;
+
+        // =====================================
+        // RIAVVIO LOOP MULTIGPS
+        // =====================================
+
+        if (multiGpsMode || sessionWasMultiGps) {
+
+            Log.e(
+                    "SERVICE_RESTORE",
+                    "Riavvio trackProcessorRunnable"
+            );
+
+            if (!trackRunnableScheduled) {
+
+                trackRunnableScheduled = true;
+
+                trackHandler.postDelayed(
+                        trackProcessorRunnable,
+                        multiGpsSendIntervalMs
+                );
+            }
         }
     }
     private void startMultiGpsMode(Intent intent) {
@@ -1377,11 +1697,57 @@ public class TxForegroundService extends Service {
     }
     private void saveTxState(String state) {
 
-        statePrefs.edit()
+        SharedPreferences prefs =
+                getSharedPreferences("TX_STATE", MODE_PRIVATE);
+
+        prefs.edit()
+
+                // =========================
+                // STATO GENERALE
+                // =========================
                 .putString(KEY_TX_STATE, state)
+
+                .putBoolean("wasRunning", isRunning)
+
+                // =========================
+                // SESSIONE
+                // =========================
+                .putString("sessionId", currentSessionId)
+
+                // =========================
+                // MODALITÀ
+                // =========================
+                .putBoolean("multiGpsMode", multiGpsMode)
+
+                .putBoolean("continuousMode", continuousMode)
+
+                .putBoolean(
+                        "sessionWasMultiGps",
+                        sessionWasMultiGps
+                )
+
+                .putString(
+                        "sessionType",
+                        sessionType
+                )
+
+                // =========================
+                // CONFIG LOOP
+                // =========================
+                .putLong(
+                        "multiGpsSendIntervalMs",
+                        multiGpsSendIntervalMs
+                )
+
                 .apply();
 
-        Log.d("TX_STATE", "Saved state=" + state);
+        Log.d(
+                "TX_STATE",
+                "Saved state=" + state +
+                        " multi=" + multiGpsMode +
+                        " cont=" + continuousMode +
+                        " session=" + currentSessionId
+        );
     }
     @Override
     public void onCreate() {
@@ -1452,7 +1818,7 @@ public class TxForegroundService extends Service {
         Log.e("MEMORY", "onLowMemory()");
         super.onLowMemory();
     }
-    private static final int DEBUG_MAX_POINTS = 5000;
+
     private void requestSingleImmediateLocation() {
 
         if (ActivityCompat.checkSelfPermission(
@@ -1531,52 +1897,104 @@ public class TxForegroundService extends Service {
     }
     private void startTracking() {
 
-        sessionStartTime = System.currentTimeMillis();
+        if (isRunning) {
+
+            Log.w("TRACK",
+                    "already running");
+
+            return;
+        }
+
+        resetSessionRuntime();
+
+        sessionStartTime =
+                System.currentTimeMillis();
+
         if (debugTrackEnabled) {
             DebugTrackStore.reset();
         }
+
         totalDistanceMeters = 0;
+
         accuracySum = 0;
+
         accuracyCount = 0;
+
         lastDistanceLocation = null;
+
         ignoreFirstGpsFix = true;
+
         smsSent = 0;
+
         gpsPointsCollected = 0;
+
         lastSmsTime = 0;
+
         firstPositionSent = false;
 
-
         SmsDebugManager.clear();
+
         synchronized (bufferLock) {
+
             gpsTrackBuffer.clear();
         }
 
-        if (isRunning) return;
-
         isRunning = true;
 
-        cycleStartTime = System.currentTimeMillis();
+        cycleStartTime =
+                System.currentTimeMillis();
+
         gpsFixValid = false;
+
+        // 🔥 salva stato runtime
+        SharedPreferences prefs =
+                getSharedPreferences(
+                        "TX_STATE",
+                        MODE_PRIVATE
+                );
+
+        prefs.edit()
+                .putBoolean("wasRunning", true)
+                .putString(
+                        "sessionId",
+                        currentSessionId
+                )
+                .apply();
 
         startContinuousGps();
 
         startUiTimer();
 
-        sendUpdate(TxStatus.WAITING, 0, 0);
+        sendUpdate(
+                TxStatus.WAITING,
+                0,
+                0
+        );
 
-        // ===== MODALITA MULTI GPS =====
+        // =================================================
+        // 🔥 MULTI GPS MODE
+        // =================================================
 
         if (multiGpsMode) {
 
+            trackHandler.removeCallbacksAndMessages(null);
+
             if (!trackRunnableScheduled) {
+
                 trackRunnableScheduled = true;
-                trackHandler.postDelayed(trackProcessorRunnable, multiGpsSendIntervalMs);
+
+                trackHandler.postDelayed(
+                        trackProcessorRunnable,
+                        multiGpsSendIntervalMs
+                );
             }
 
             return;
         }
 
-        // ===== MODALITA STANDARD / CONTINUOUS =====
+        // =================================================
+        // 🔥 STANDARD MODE
+        // =================================================
 
         requestSingleImmediateLocation();
 
@@ -1584,21 +2002,29 @@ public class TxForegroundService extends Service {
 
         startTimer();
 
-        rxTimeoutMs = intervalMinutes * 150000L;
+        rxTimeoutMs =
+                intervalMinutes * 150000L;
 
         startRxMonitor();
 
-        SharedPreferences prefs =
-                getSharedPreferences("HEARTBEAT", MODE_PRIVATE);
+        SharedPreferences hbPrefs =
+                getSharedPreferences(
+                        "HEARTBEAT",
+                        MODE_PRIVATE
+                );
 
-        prefs.edit()
-                .putLong("lastAlive", System.currentTimeMillis())
+        hbPrefs.edit()
+                .putLong(
+                        "lastAlive",
+                        System.currentTimeMillis()
+                )
                 .apply();
 
         pingSent = false;
 
         sendRxStatus(true);
     }
+
     private boolean pingSent = false;
     private void startRxMonitor() {
 
@@ -1706,11 +2132,150 @@ public class TxForegroundService extends Service {
     }
     private void sendTrackSms(String text) {
 
-        List<String> single = new ArrayList<>();
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+
+        List<String> single =
+                new ArrayList<>();
+
         single.add(text);
 
-        enqueueSmsBatch(single, text.contains("|F|"));
+        enqueueSmsBatch(
+                single,
+                text.contains("|F|")
+        );
     }
+
+    private boolean sendTrackSmsInternal(
+            String text,
+            String retryKey
+    ) {
+
+        if (text == null || text.isEmpty()) {
+
+            Log.e("SMS_TX",
+                    "EMPTY SMS");
+
+            return false;
+        }
+
+        if (!isRunning && !isFinalFlush) {
+
+            Log.e("SMS_TX",
+                    "NOT RUNNING");
+
+            return false;
+        }
+
+        if (phoneNumber == null ||
+                phoneNumber.isEmpty()) {
+
+            Log.e("SMS_TX",
+                    "PHONE NULL");
+
+            return false;
+        }
+
+        try {
+
+            // =================================================
+            // 🔥 DEBUG LOG
+            // =================================================
+
+            SmsDebugManager.logTx(text);
+
+            // =================================================
+            // 🔥 COUNTER
+            // =================================================
+
+            smsSent++;
+
+            updateUiSmsCounter();
+
+            // =================================================
+            // 🔥 DEBUG MODE
+            // =================================================
+
+            if (smsDebugMode) {
+
+                Log.d("SMS_DEBUG",
+                        "SMS BLOCKED DEBUG MODE");
+
+                return true;
+            }
+
+            SmsManager smsManager;
+
+            if (Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.S) {
+
+                smsManager =
+                        getSystemService(
+                                SmsManager.class
+                        );
+
+            } else {
+
+                smsManager =
+                        SmsManager.getDefault();
+            }
+
+            if (smsManager == null) {
+
+                Log.e("SMS_TX",
+                        "SmsManager NULL");
+
+                return false;
+            }
+
+            // =================================================
+            // 🔥 SENT INTENT
+            // =================================================
+
+            Intent sentIntent =
+                    new Intent(
+                            "SMS_SENT_ACTION"
+                    );
+
+            sentIntent.putExtra(
+                    "retryKey",
+                    retryKey
+            );
+
+            PendingIntent sentPI =
+                    PendingIntent.getBroadcast(
+                            this,
+                            retryKey.hashCode(),
+                            sentIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT |
+                                    PendingIntent.FLAG_IMMUTABLE
+                    );
+
+            smsManager.sendTextMessage(
+                    phoneNumber,
+                    null,
+                    text,
+                    sentPI,
+                    null
+            );
+
+            Log.d("SMS_TX",
+                    "SMS SENT len=" + text.length());
+
+            return true;
+
+        } catch (Exception e) {
+
+            Log.e("SMS_TX",
+                    "SEND ERROR",
+                    e);
+
+            return false;
+        }
+    }
+
+
     private void sendSms(Location location) {
 
         if (multiGpsMode) {
@@ -2015,43 +2580,223 @@ public class TxForegroundService extends Service {
                     sendBatchSequentially(parts, index), 1000);
         }
     }
-    private void sendNextPart(List<String> parts, int index, String sessionSnapshot) {
-        if (index >= parts.size()) {
-            Log.e("SEQ_END", "ALL PARTS SENT");
+    private void sendNextPart(
+            List<String> parts,
+            int index,
+            String sessionSnapshot,
+            boolean finalBatch
+    ){
+
+        if (parts == null || parts.isEmpty()) {
+
+            Log.e("SEQ",
+                    "empty parts");
+
             return;
-        }
-        // 🔒 sessione cambiata
-        if (!sessionSnapshot.equals(currentSessionId)) {
-            Log.w("SEQ", "DROP → session changed");
-            return;
-        }
-        // 🔒 blocco dopo F
-        if (finalSmsSent) {
-            Log.e("SEQ", "STOP → finalSmsSent=true");
-            return;
-        }
-        String sms = parts.get(index);
-        // 🔥 stato reale flush
-        boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
-        boolean isFinal = isRealFinalFlush && index == parts.size() - 1;
-        Log.e("SMS_SEND_REAL", "SENDING [" + index + "/" + parts.size() + "] → " + sms);
-        try {
-            sendTrackSms(sms);
-        } catch (Exception e) {
-            Log.e("SEQ_ERROR", "SEND FAILED index=" + index, e);
-            return;
-        }
-        // 🔥 segna F SOLO DOPO invio reale
-        if (isFinal) {
-            finalSmsSent = true;
-            Log.e("TRACK", "FINAL SMS MARKED SENT");
         }
 
-        // 🔁 invio successivo (sequenziale)
+        // =====================================================
+        // 🔥 END OF BATCH
+        // =====================================================
+
+        if (index >= parts.size()) {
+
+            Log.e("SEQ_END",
+                    "ALL PARTS SENT");
+
+            queueProcessing.set(false);
+
+            processNextBatch();
+
+            if (stopPending) {
+
+                Log.e("STOP_FLOW",
+                        "FINAL BATCH COMPLETE → STOP SERVICE");
+
+                stopPending = false;
+
+                sessionEndTime = System.currentTimeMillis();
+
+                try {
+                    saveSmsLog();
+                } catch (Exception e) {
+                    Log.e("STOP_FLOW", "saveSmsLog error", e);
+                }
+
+                try {
+                    saveTxState("IDLE");
+                } catch (Exception e) {
+                    Log.e("STOP_FLOW", "saveTxState error", e);
+                }
+
+                stopTrackingInternal();
+            }
+
+            return;
+        }
+
+        // =====================================================
+        // 🔥 SESSION CHANGED
+        // =====================================================
+
+        if (!sessionSnapshot.equals(currentSessionId)) {
+
+            Log.w("SEQ",
+                    "DROP → session changed");
+
+            return;
+        }
+
+        // =====================================================
+        // 🔥 STOPPING
+        // =====================================================
+
+        if (serviceStopping.get()) {
+
+            Log.e("SEQ",
+                    "STOPPING ACTIVE");
+
+            return;
+        }
+
+        // =====================================================
+        // 🔥 FINAL ALREADY SENT
+        // =====================================================
+
+        if (finalSmsSent) {
+
+            Log.e("SEQ",
+                    "BLOCKED → finalSmsSent=true");
+
+            return;
+        }
+
+        final int currentIndex = index;
+
+        String sms = parts.get(currentIndex);
+
+        // =====================================================
+        // 🔥 FINAL DETECTION
+        // =====================================================
+
+        boolean isFinal =
+                finalBatch &&
+                        currentIndex == parts.size() - 1;
+
+        Log.e("SMS_SEND_REAL",
+                "SENDING [" +
+                        currentIndex +
+                        "/" +
+                        parts.size() +
+                        "] → " +
+                        sms);
+
+        // =====================================================
+        // 🔥 RETRY KEY
+        // =====================================================
+
+        String retryKey =
+                currentSessionId +
+                        "_" +
+                        currentIndex;
+
+        int retry =
+                retryMap.getOrDefault(
+                        retryKey,
+                        0
+                );
+
+        try {
+
+            boolean success =
+                    sendTrackSmsInternal(
+                            sms,
+                            retryKey
+                    );
+
+            if (!success) {
+
+                retry++;
+
+                retryMap.put(
+                        retryKey,
+                        retry
+                );
+
+                if (retry >= MAX_SMS_RETRY) {
+
+                    Log.e("SMS_SEND",
+                            "MAX RETRY REACHED index=" +
+                                    currentIndex);
+
+                    return;
+                }
+
+                int finalRetry = retry;
+
+                txHandler.postDelayed(() -> {
+
+                    Log.e("SMS_RETRY",
+                            "retry=" + finalRetry);
+
+                    sendNextPart(
+                            parts,
+                            currentIndex + 1,
+                            sessionSnapshot,
+                            finalBatch
+                    );
+
+                }, 1500L);
+
+                return;
+            }
+
+            // =================================================
+            // 🔥 SUCCESS
+            // =================================================
+
+            retryMap.remove(retryKey);
+
+        } catch (Exception e) {
+
+            Log.e("SEQ_ERROR",
+                    "SEND FAILED index=" + currentIndex,
+                    e);
+
+            return;
+        }
+
+        // =====================================================
+        // 🔥 FINAL SENT
+        // =====================================================
+
+        if (isFinal) {
+
+            finalSmsSent = true;
+
+            Log.e("TRACK",
+                    "FINAL SMS MARKED SENT");
+
+            //completeFinalFlush();
+        }
+
+        // =====================================================
+        // 🔥 NEXT PART
+        // =====================================================
+
         txHandler.postDelayed(() -> {
-            sendNextPart(parts, index + 1, sessionSnapshot);
-        }, 400L); // leggermente più sicuro di 300
+
+            sendNextPart(
+                    parts,
+                    currentIndex + 1,
+                    sessionSnapshot,
+                    finalBatch
+            );
+
+        }, 450L);
     }
+
+
     private void applyAdaptiveConfig(AdaptiveConfig c) {
         if (c == null) return;
         trackSimplifyDistance = c.distance;
@@ -2104,128 +2849,244 @@ public class TxForegroundService extends Service {
 
 
     private void processTrackBuffer() {
-        Log.e("FLUSH_STATE",
-                "ENTER processTrackBuffer | isFinalFlush=" + isFinalFlush +
-                        " | finalStarted=" + finalFlushStarted.get() +
-                        " | finalSent=" + finalSmsSent +
-                        " | isRunning=" + isRunning,
-                new Exception());
-        if (isFinalFlush && !finalFlushStarted.get()) {
-            Log.e("FLUSH_GHOST",
-                    "👻 GHOST FLUSH DETECTED → qualcuno ha settato isFinalFlush=true senza autorizzazione",
-                    new Exception());
-            return;
-        }
-        Log.e("STOP_DEBUG",
-                "processTrackBuffer CALLED | final=" + finalSmsSent +
-                        " flush=" + isFinalFlush,
-                new Exception());
-        // 🔴 BLOCCO TOTALE DOPO F
-        if (finalSmsSent) {
-            Log.e("STOP_DEBUG", "PROCESS BLOCCATO → finalSmsSent=true");
 
-            // 🔥 sicurezza: reset soft
-            if (!isRunning) {
-                finalSmsSent = false;
-                Log.e("STOP_DEBUG", "RESET finalSmsSent per sicurezza");
-            }
+        Log.e("FLUSH_STATE",
+                "ENTER processTrackBuffer | isFinalFlush=" +
+                        isFinalFlush +
+                        " | finalStarted=" +
+                        finalFlushStarted.get() +
+                        " | finalSent=" +
+                        finalSmsSent +
+                        " | isRunning=" +
+                        isRunning,
+                new Exception());
+
+        // =====================================================
+        // 🔥 GHOST FLUSH PROTECTION
+        // =====================================================
+
+        if (isFinalFlush &&
+                !finalFlushStarted.get()) {
+
+            Log.e("FLUSH_GHOST",
+                    "👻 GHOST FLUSH DETECTED",
+                    new Exception());
+
             return;
         }
-        // 🔴 FIX 3 — protezione flush fantasma
-        if (isFinalFlush && !finalFlushStarted.get()) {
-            Log.e("STOP_DEBUG", "🚨 FLUSH FANTASMA IGNORATO");
+
+        // =====================================================
+        // 🔥 FINAL BLOCK
+        // =====================================================
+
+        if (finalSmsSent) {
+
+            Log.e("STOP_DEBUG",
+                    "PROCESS BLOCKED → finalSmsSent=true");
+
             return;
         }
-        // ================================
-        // 🔒 LOCK PROCESSING
-        // ================================
+
+        // =====================================================
+        // 🔥 STOPPING
+        // =====================================================
+
+        if (serviceStopping.get()) {
+
+            Log.e("PROCESS",
+                    "SERVICE STOPPING");
+
+            return;
+        }
+
+        // =====================================================
+        // 🔥 LOCK
+        // =====================================================
+
         synchronized (processingLock) {
-            if (!isRunning || !multiGpsMode || isProcessing) {
+
+            if (!isRunning ||
+                    !multiGpsMode ||
+                    isProcessing) {
+
                 return;
             }
+
             isProcessing = true;
         }
+
         try {
-            List<GpsPoint> rawPoints = new ArrayList<>();
+
+            List<GpsPoint> rawPoints =
+                    new ArrayList<>();
+
             TrackSegment segment = null;
-            // ================================
-            // 📦 BUFFER READ
-            // ================================
+
+            // =================================================
+            // 🔥 BUFFER READ
+            // =================================================
+
             synchronized (bufferLock) {
-                List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-                if (current == null || current.isEmpty()) {
-                    if (isFinalFlush && !finalSmsSent) {
-                        Log.e("STOP_DEBUG", "FLUSH FINALE SENZA DATI → INVIO F VUOTO");
-                        boolean isRealFinalFlush = finalFlushStarted.get();
-                        String header = "TX|" + currentSessionId + "|0/1|F|";
-                        String crc = SmsCrc.INSTANCE.crc8(header);
-                        String sms = header + "|" + crc;
-                        List<String> parts = new ArrayList<>();
+
+                List<GpsPoint> current =
+                        gpsTrackBuffer.getPointsCopy();
+
+                if (current == null ||
+                        current.isEmpty()) {
+
+                    // =========================================
+// 🔥 FINAL EMPTY FLUSH
+// =========================================
+
+                    if (isFinalFlush &&
+                            !finalSmsSent) {
+
+                        Log.e("STOP_DEBUG",
+                                "FINAL EMPTY FLUSH");
+
+                        String header =
+                                "TX|" +
+                                        currentSessionId +
+                                        "|0|0/1|F|";
+
+                        String crc =
+                                SmsCrc.INSTANCE.crc8(
+                                        header
+                                );
+
+                        String sms =
+                                header + "|" + crc;
+
+                        List<String> parts =
+                                new ArrayList<>();
+
                         parts.add(sms);
-                        enqueueSmsBatch(parts, isRealFinalFlush);
-                        smsSent += 1;
-                        setFinalFlush(false, "processTrackBuffer RESET");
-                        return;
+
+                        // 🔥 QUEUE FINAL BATCH
+                        enqueueSmsBatch(
+                                parts,
+                                true
+                        );
+
+                        Log.e("FINAL_FLUSH",
+                                "FINAL EMPTY BATCH ENQUEUED");
                     }
+
                     return;
                 }
-                // =========================
-                // 🔥 PRIMO BLOCCO
-                // =========================
+
+                // =============================================
+                // 🔥 FIRST BLOCK RULES
+                // =============================================
+
                 int MIN_FIRST_BLOCK = 25;
+
                 int MIN_NORMAL_BLOCK = 10;
+
                 if (!isFinalFlush) {
+
                     if (!firstBlockSent) {
-                        if (current.size() < MIN_FIRST_BLOCK) return;
+
+                        if (current.size() <
+                                MIN_FIRST_BLOCK) {
+
+                            return;
+                        }
+
                     } else {
-                        if (current.size() < MIN_NORMAL_BLOCK) return;
+
+                        if (current.size() <
+                                MIN_NORMAL_BLOCK) {
+
+                            return;
+                        }
                     }
                 }
-                // =========================
-                // 🔥 ACCUMULO VERO (NUOVA VERSIONE TrackPointEx)
-                // =========================
+
+                // =============================================
+                // 🔥 HISTORY BUILD
+                // =============================================
 
                 for (GpsPoint gps : current) {
 
-                    TrackPointEx newPoint = new TrackPointEx();
+                    TrackPointEx newPoint =
+                            new TrackPointEx();
 
                     newPoint.pointId =
                             nextPointId.getAndIncrement();
 
-                    Location loc = new Location("gps");
+                    Location loc =
+                            new Location("gps");
 
-                    loc.setLatitude(gps.getLat());
-                    loc.setLongitude(gps.getLon());
+                    loc.setLatitude(
+                            gps.getLat()
+                    );
+
+                    loc.setLongitude(
+                            gps.getLon()
+                    );
+
 
                     newPoint.location = loc;
 
                     newPoint.timestamp =
-                            System.currentTimeMillis();
+                            gps.getTimestamp();
+
+                    // =========================================
+                    // 🔥 FIRST POINT
+                    // =========================================
 
                     if (fullTrackHistory.isEmpty()) {
 
-                        fullTrackHistory.add(newPoint);
+                        fullTrackHistory.add(
+                                newPoint
+                        );
+
                         continue;
                     }
 
                     TrackPointEx last =
-                            fullTrackHistory.get(fullTrackHistory.size() - 1);
+                            fullTrackHistory.get(
+                                    fullTrackHistory.size() - 1
+                            );
 
-                    Location lastLoc = last.location;
-                    Location newLoc = newPoint.location;
+                    Location lastLoc =
+                            last.location;
 
-                    if (Math.abs(lastLoc.getLatitude() - newLoc.getLatitude()) > 0.000001 ||
-                            Math.abs(lastLoc.getLongitude() - newLoc.getLongitude()) > 0.000001) {
+                    // =========================================
+                    // 🔥 DUPLICATE FILTER
+                    // =========================================
 
-                        fullTrackHistory.add(newPoint);
+                    double latDiff =
+                            Math.abs(
+                                    lastLoc.getLatitude() -
+                                            loc.getLatitude()
+                            );
+
+                    double lonDiff =
+                            Math.abs(
+                                    lastLoc.getLongitude() -
+                                            loc.getLongitude()
+                            );
+
+                    if (latDiff > 0.000001 ||
+                            lonDiff > 0.000001) {
+
+                        fullTrackHistory.add(
+                                newPoint
+                        );
                     }
                 }
 
-                // 🔥 LIMIT MEMORIA
+                // =============================================
+                // 🔥 MEMORY LIMIT
+                // =============================================
 
-                if (fullTrackHistory.size() > MAX_HISTORY_POINTS) {
+                if (fullTrackHistory.size() >
+                        MAX_HISTORY_POINTS) {
 
-                    Log.w("MEMORY", "HISTORY TRIM");
+                    Log.w("MEMORY",
+                            "HISTORY TRIM");
 
                     int trimCount =
                             fullTrackHistory.size() - 4000;
@@ -2239,17 +3100,15 @@ public class TxForegroundService extends Service {
                     }
                 }
 
-                // =========================
-                // 🔥 COSTRUZIONE SEGMENTO TEMPORANEO
-                // =========================
+                // =============================================
+                // 🔥 BUILD TEMP SEGMENT
+                // =============================================
 
-                rawPoints = new ArrayList<>();
-
-                // ultimi punti della history
-                int startIndex = Math.max(
-                        0,
-                        fullTrackHistory.size() - 300
-                );
+                int startIndex =
+                        Math.max(
+                                0,
+                                fullTrackHistory.size() - 300
+                        );
 
                 List<TrackPointEx> segmentPoints =
                         new ArrayList<>(
@@ -2258,6 +3117,14 @@ public class TxForegroundService extends Service {
                                         fullTrackHistory.size()
                                 )
                         );
+
+                if (segmentPoints.isEmpty()) {
+
+                    Log.d("TX_FLOW",
+                            "NO SEGMENT POINTS");
+
+                    return;
+                }
 
                 segment = new TrackSegment();
 
@@ -2268,144 +3135,228 @@ public class TxForegroundService extends Service {
                         System.currentTimeMillis();
 
                 segment.points =
-                        new ArrayList<>(segmentPoints);
-
-                if (segmentPoints.isEmpty()) {
-
-                    Log.d("TX_FLOW", "Nessun punto disponibile");
-
-                    return;
-                }
+                        new ArrayList<>(
+                                segmentPoints
+                        );
 
                 segment.startPointId =
                         segmentPoints.get(0).pointId;
 
                 segment.endPointId =
-                        segmentPoints.get(segmentPoints.size() - 1).pointId;
+                        segmentPoints.get(
+                                segmentPoints.size() - 1
+                        ).pointId;
 
                 segment.acknowledged = false;
 
                 segment.retryCount = 0;
+
+                // =============================================
+                // 🔥 PENDING LIMIT
+                // =============================================
+
+                if (pendingSegments.size() >
+                        MAX_PENDING_SEGMENTS) {
+
+                    Log.w("SEGMENT",
+                            "pending overflow → clear");
+
+                    pendingSegments.clear();
+                }
 
                 pendingSegments.put(
                         segment.segmentId,
                         segment
                 );
 
-
-
-                // =========================
-                // 🔥 CONVERSIONE TrackPointEx -> GpsPoint
-                // =========================
+                // =============================================
+                // 🔥 CONVERT TO RAW POINTS
+                // =============================================
 
                 for (TrackPointEx tp : segmentPoints) {
 
-                    Location loc = tp.location;
+                    Location loc =
+                            tp.location;
 
-                    rawPoints.add(new GpsPoint(
-                            tp.timestamp,
-                            loc.getLatitude(),
-                            loc.getLongitude(),
-                            loc.hasAccuracy()
-                                    ? loc.getAccuracy()
-                                    : 0f
-                    ));
+                    rawPoints.add(
+                            new GpsPoint(
+                                    tp.timestamp,
+                                    loc.getLatitude(),
+                                    loc.getLongitude(),
+                                    loc.hasAccuracy()
+                                            ? loc.getAccuracy()
+                                            : 0f
+                            )
+                    );
                 }
 
                 Log.d("TX_FLOW",
-                        "NEW POINTS ONLY = " + rawPoints.size());
+                        "RAW POINTS=" +
+                                rawPoints.size());
             }
+
+            // =================================================
+            // 🔥 EMPTY CHECK
+            // =================================================
+
             if (rawPoints.isEmpty()) {
-                Log.w("TX_FLOW", "rawPoints vuoto → skip");
+
+                Log.w("TX_FLOW",
+                        "rawPoints empty");
+
                 return;
             }
 
-            long now = System.currentTimeMillis();
+            long now =
+                    System.currentTimeMillis();
 
-            // ================================
-            // 📍 CONVERSIONE
-            // ================================
-            List<LatLng> latLngPoints = convertGpsPointsToLatLng(rawPoints);
+            // =================================================
+            // 🔥 CONVERSION
+            // =================================================
 
-            // ================================
-            // 🔥 WORKING COPY (NO LOSS TRACK)
-            // ================================
-            List<LatLng> workingPoints = new ArrayList<>(latLngPoints);
+            List<LatLng> latLngPoints =
+                    convertGpsPointsToLatLng(
+                            rawPoints
+                    );
 
-            // 🔥 SOLO PER SMS, NON TOCCA LO STORICO
+            List<LatLng> workingPoints =
+                    new ArrayList<>(
+                            latLngPoints
+                    );
+
+            // =================================================
+            // 🔥 HARD REDUCTION
+            // =================================================
+
             if (workingPoints.size() > 400) {
 
-                List<LatLng> reduced = new ArrayList<>();
+                List<LatLng> reduced =
+                        new ArrayList<>();
 
-                int step = Math.max(1, workingPoints.size() / 300);
+                int step =
+                        Math.max(
+                                1,
+                                workingPoints.size() / 300
+                        );
 
-                for (int i = 0; i < workingPoints.size(); i += step) {
-                    reduced.add(workingPoints.get(i));
+                for (int i = 0;
+                     i < workingPoints.size();
+                     i += step) {
+
+                    reduced.add(
+                            workingPoints.get(i)
+                    );
                 }
 
                 workingPoints = reduced;
 
-                Log.w("ADAPT", "Compression reduction: " + workingPoints.size());
+                Log.w("ADAPT",
+                        "Compression reduction: " +
+                                workingPoints.size());
             }
 
-            // ================================
-            // 🔴 SMART POINT REDUCTION (NO LOSS TRACK)
-            // ================================
+            // =================================================
+            // 🔥 SMART REDUCTION
+            // =================================================
+
             if (workingPoints.size() > 300) {
 
-                Log.w("ADAPT", "SMART REDUCTION → original: " + workingPoints.size());
+                List<LatLng> reduced =
+                        new ArrayList<>();
 
-                // 🔥 mantieni inizio + fine + campionamento centrale
-                List<LatLng> reduced = new ArrayList<>();
+                int keepHead =
+                        Math.min(
+                                50,
+                                workingPoints.size() / 2
+                        );
 
-                int keepHead = Math.min(50, workingPoints.size() / 2);
                 int keepTail = keepHead;
 
-                // MIDDLE (sampling)
-                int step = Math.max(1, workingPoints.size() / 200);
-                for (int i = keepHead; i < workingPoints.size() - keepTail; i += step) {
-                    reduced.add(workingPoints.get(i));
+                reduced.addAll(
+                        workingPoints.subList(
+                                0,
+                                keepHead
+                        )
+                );
+
+                int step =
+                        Math.max(
+                                1,
+                                workingPoints.size() / 200
+                        );
+
+                for (int i = keepHead;
+                     i < workingPoints.size() - keepTail;
+                     i += step) {
+
+                    reduced.add(
+                            workingPoints.get(i)
+                    );
                 }
 
-                // END
-                reduced.addAll(workingPoints.subList(
-                        workingPoints.size() - keepTail,
-                        workingPoints.size()
-                ));
+                reduced.addAll(
+                        workingPoints.subList(
+                                workingPoints.size() - keepTail,
+                                workingPoints.size()
+                        )
+                );
 
                 workingPoints = reduced;
 
-                Log.w("ADAPT", "AFTER REDUCTION → " + workingPoints.size());
+                Log.w("ADAPT",
+                        "AFTER REDUCTION → " +
+                                workingPoints.size());
             }
 
+            // =================================================
+            // 🔥 CURVE PROTECTION
+            // =================================================
 
-            // ================================
-            // 🔥 CURVE PROTECTION (PRIMA DELLA COMPRESSIONE)
-            // ================================
             if (workingPoints.size() > 3) {
 
-                List<LatLng> protectedPoints = new ArrayList<>();
+                List<LatLng> protectedPoints =
+                        new ArrayList<>();
 
-                int step = Math.max(1, workingPoints.size() / 150); // 🔥 base sampling
+                int step =
+                        Math.max(
+                                1,
+                                workingPoints.size() / 150
+                        );
 
-                for (int i = 0; i < workingPoints.size(); i++) {
+                for (int i = 0;
+                     i < workingPoints.size();
+                     i++) {
 
-                    // 🔹 sampling base (mantieni struttura)
                     if (i % step == 0) {
-                        protectedPoints.add(workingPoints.get(i));
+
+                        protectedPoints.add(
+                                workingPoints.get(i)
+                        );
+
                         continue;
                     }
 
-                    // 🔹 protezione curve
-                    if (i > 0 && i < workingPoints.size() - 1) {
+                    if (i > 0 &&
+                            i < workingPoints.size() - 1) {
 
-                        LatLng prev = workingPoints.get(i - 1);
-                        LatLng curr = workingPoints.get(i);
-                        LatLng next = workingPoints.get(i + 1);
+                        LatLng prev =
+                                workingPoints.get(i - 1);
 
-                        double angle = calculateAngle(prev, curr, next);
+                        LatLng curr =
+                                workingPoints.get(i);
 
-                        if (angle < 150) { // 🔥 più selettivo
+                        LatLng next =
+                                workingPoints.get(i + 1);
+
+                        double angle =
+                                calculateAngle(
+                                        prev,
+                                        curr,
+                                        next
+                                );
+
+                        if (angle < 150) {
+
                             protectedPoints.add(curr);
                         }
                     }
@@ -2413,242 +3364,354 @@ public class TxForegroundService extends Service {
 
                 workingPoints = protectedPoints;
 
-                Log.d("CURVE", "Protected points=" + protectedPoints.size());
+                Log.d("CURVE",
+                        "Protected points=" +
+                                protectedPoints.size());
             }
-            /// ================================
-            // 🎯 PARAMETRI SMS
-            // ================================
+            // =================================================
+            // 🔥 SMS TARGET
+            // =================================================
+
             int maxSmsLen = 140;
 
-            // header di STIMA (non reale)
-            // worst case realistico (sicuro)
             String testHeader =
                     "TX|" +
                             currentSessionId +
                             "|999999|" +
-                            "999999|" +
+                            "999/999|" +
                             "F|";
 
-            int headerLen = testHeader.length();
+            int headerLen =
+                    testHeader.length();
+
             int crcLen = 3;
+
             int safetyMargin = 10;
 
-            int targetPayloadLen = maxSmsLen - headerLen - crcLen - safetyMargin;
+            int targetPayloadLen =
+                    maxSmsLen
+                            - headerLen
+                            - crcLen
+                            - safetyMargin;
 
-            Log.d("ADAPT", "Target payload len=" + targetPayloadLen);
+            Log.d("ADAPT",
+                    "Target payload len=" +
+                            targetPayloadLen);
 
-            // ================================
-            // 🧠 COMPRESSIONE ADATTIVA
-            // ================================
+            // =================================================
+            // 🔥 ADAPTIVE COMPRESSION
+            // =================================================
+
             CompressionResult bestResult = null;
-            int bestSmsLen = Integer.MAX_VALUE;
 
-            float tolerance = trackSimplifyTolerance * 0.7f;
+            int bestSmsLen =
+                    Integer.MAX_VALUE;
+
+            float tolerance =
+                    trackSimplifyTolerance * 0.7f;
 
             String payload;
+
             int smsLen;
 
             for (int i = 0; i < 3; i++) {
 
-                CompressionResult temp = AdaptiveSmsCompressor.compressToSms(
-                        workingPoints,
-                        tolerance,
-                        trackSimplifyDistance,
-                        trackAngleThreshold,
-                        200
-                );
+                CompressionResult temp =
+                        AdaptiveSmsCompressor.compressToSms(
+                                workingPoints,
+                                tolerance,
+                                trackSimplifyDistance,
+                                trackAngleThreshold,
+                                200
+                        );
 
-                if (temp == null || temp.encoded == null) continue;
+                if (temp == null ||
+                        temp.encoded == null) {
 
-                payload = "TX|" + currentSessionId + "|0/0|D|" + temp.encoded;
-                smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+                    continue;
+                }
+
+                payload =
+                        "TX|" +
+                                currentSessionId +
+                                "|0|0/0|D|" +
+                                temp.encoded;
+
+                smsLen =
+                        (
+                                payload +
+                                        "|" +
+                                        SmsCrc.INSTANCE.crc8(payload)
+                        ).length();
 
                 int targetSmsLen = 120;
 
                 if (bestResult == null ||
-                        Math.abs(smsLen - targetSmsLen) < Math.abs(bestSmsLen - targetSmsLen)) {
+                        Math.abs(smsLen - targetSmsLen)
+                                <
+                                Math.abs(bestSmsLen - targetSmsLen)) {
 
                     bestResult = temp;
+
                     bestSmsLen = smsLen;
                 }
 
-                if (smsLen >= 110 && smsLen <= 140) break;
+                if (smsLen >= 110 &&
+                        smsLen <= 140) {
 
-                if (smsLen > 140) tolerance *= 1.6f;
-                else if (smsLen < 100) tolerance *= 0.6f;
-                else tolerance *= 0.8f;
-            }
-            // ================================
-            // 🚨 VALIDAZIONE
-            // ================================
-            if (bestResult == null || bestResult.encoded == null || bestResult.encoded.isEmpty()) {
-                Log.e("ADAPT", "Compression FAILED → abort");
-                return;
-            }
-            CompressionResult res = bestResult;
-            // ================================
-            // 🚨 HARD LIMIT
-            // ================================
-            payload = "TX|" + currentSessionId + "|0/0|D|" + res.encoded;
-            smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
-
-            int safety = 0;
-
-            while (smsLen > 140 && safety < 3) {
-
-                tolerance *= 1.25f;
-
-                res = AdaptiveSmsCompressor.compressToSms(
-                        workingPoints,
-                        tolerance,
-                        trackSimplifyDistance,
-                        trackAngleThreshold,
-                        200
-                );
-
-                if (res == null || res.encoded == null) break;
-
-                payload = "TX|" + currentSessionId + "|0/0|D|" + res.encoded;
-                smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+                    break;
+                }
 
                 if (smsLen > 140) {
 
-                    int maxPayloadLen =
-                            140
-                                    - ("TX|" + currentSessionId + "|999/999|F|").length()
-                                    - 3
-                                    - 2;
+                    tolerance *= 1.6f;
 
-                    if (res.encoded.length() > maxPayloadLen) {
-                        res.encoded = res.encoded.substring(0, maxPayloadLen);
-                    }
+                } else if (smsLen < 100) {
 
-                    payload = "TX|" + currentSessionId + "|0/0|D|" + res.encoded;
-                    smsLen = (payload + "|" + SmsCrc.INSTANCE.crc8(payload)).length();
+                    tolerance *= 0.6f;
+
+                } else {
+
+                    tolerance *= 0.8f;
                 }
+            }
+
+            // =================================================
+            // 🔥 VALIDATION
+            // =================================================
+
+            if (bestResult == null ||
+                    bestResult.encoded == null ||
+                    bestResult.encoded.isEmpty()) {
+
+                Log.e("ADAPT",
+                        "Compression FAILED");
+
+                return;
+            }
+
+            CompressionResult res =
+                    bestResult;
+
+            // =================================================
+            // 🔥 HARD LIMIT
+            // =================================================
+
+            payload =
+                    "TX|" +
+                            currentSessionId +
+                            "|0|0/0|D|" +
+                            res.encoded;
+
+            smsLen =
+                    (
+                            payload +
+                                    "|" +
+                                    SmsCrc.INSTANCE.crc8(payload)
+                    ).length();
+
+            int safety = 0;
+
+            while (smsLen > 140 &&
+                    safety < 5) {
+
+                tolerance *= 1.25f;
+
+                res =
+                        AdaptiveSmsCompressor.compressToSms(
+                                workingPoints,
+                                tolerance,
+                                trackSimplifyDistance,
+                                trackAngleThreshold,
+                                200
+                        );
+
+                if (res == null ||
+                        res.encoded == null) {
+
+                    break;
+                }
+
+                payload =
+                        "TX|" +
+                                currentSessionId +
+                                "|0|0/0|D|" +
+                                res.encoded;
+
+                smsLen =
+                        (
+                                payload +
+                                        "|" +
+                                        SmsCrc.INSTANCE.crc8(payload)
+                        ).length();
+
                 safety++;
             }
-            // ================================
-            // 📊 DEBUG STORE (SAFE VERSION)
-            // ================================
-            if (debugTrackEnabled && res != null) {
+
+            if (smsLen > 140) {
+
+                Log.e("SMS_FATAL",
+                        "UNRECOVERABLE OVERFLOW");
+
+                return;
+            }
+
+            // =================================================
+            // 🔥 DEBUG STORE SAFE
+            // =================================================
+
+            if (debugTrackEnabled &&
+                    res != null) {
 
                 final int MAX_DEBUG_POINTS = 2000;
+
                 final int MAX_HISTORY = 200;
 
-                // =========================
-                // 🔴 HARD LIMIT (anti OOM)
-                // =========================
-                if (DebugTrackStore.raw.size() > MAX_DEBUG_POINTS) {
-
-                    Log.w("MEMORY", "DEBUG RESET → overflow");
+                if (DebugTrackStore.raw.size()
+                        > MAX_DEBUG_POINTS) {
 
                     DebugTrackStore.raw.clear();
+
                     DebugTrackStore.filtered.clear();
+
                     DebugTrackStore.simplified.clear();
 
                     DebugTrackStore.rawHistory.clear();
+
                     DebugTrackStore.filteredHistory.clear();
+
                     DebugTrackStore.simplifiedHistory.clear();
+
                     DebugTrackStore.timeHistory.clear();
                 }
 
-                // =========================
-                // 🔴 RAW (LIMITATO)
-                // =========================
-                if (DebugTrackStore.raw.size() < MAX_DEBUG_POINTS) {
-                    DebugTrackStore.raw.addAll(workingPoints.subList(0, Math.min(20, workingPoints.size())));
-                }
-
-                if (DebugTrackStore.raw.size() > MAX_DEBUG_POINTS) {
-                    DebugTrackStore.raw = DebugTrackStore.raw.subList(
-                            DebugTrackStore.raw.size() - MAX_DEBUG_POINTS,
-                            DebugTrackStore.raw.size()
-                    );
-                }
-                DebugTrackStore.rawCount = DebugTrackStore.raw.size();
-
-                // =========================
-                // 🟡 FILTERED
-                // =========================
                 List<LatLng> filteredPoints =
-                        BasicFilter.apply(workingPoints,
+                        BasicFilter.apply(
+                                workingPoints,
                                 (float) trackSimplifyDistance,
-                                (float) trackAngleThreshold);
+                                (float) trackAngleThreshold
+                        );
 
-                DebugTrackStore.filtered.addAll(filteredPoints);
-
-                if (DebugTrackStore.filtered.size() > MAX_DEBUG_POINTS) {
-                    DebugTrackStore.filtered = DebugTrackStore.filtered.subList(
-                            DebugTrackStore.filtered.size() - MAX_DEBUG_POINTS,
-                            DebugTrackStore.filtered.size()
-                    );
-                }
-                DebugTrackStore.filteredCount = DebugTrackStore.filtered.size();
-
-                // =========================
-                // 🟢 SIMPLIFIED
-                // =========================
                 List<LatLng> simplifiedPoints =
-                        TrackSimplifier.simplify(filteredPoints, res.usedEpsilon);
+                        TrackSimplifier.simplify(
+                                filteredPoints,
+                                res.usedEpsilon
+                        );
 
-                DebugTrackStore.simplified.addAll(simplifiedPoints);
+                DebugTrackStore.raw.addAll(
+                        workingPoints.subList(
+                                0,
+                                Math.min(
+                                        20,
+                                        workingPoints.size()
+                                )
+                        )
+                );
 
-                if (DebugTrackStore.simplified.size() > MAX_DEBUG_POINTS) {
-                    DebugTrackStore.simplified = DebugTrackStore.simplified.subList(
-                            DebugTrackStore.simplified.size() - MAX_DEBUG_POINTS,
-                            DebugTrackStore.simplified.size()
-                    );
+                DebugTrackStore.filtered.addAll(
+                        filteredPoints
+                );
+
+                DebugTrackStore.simplified.addAll(
+                        simplifiedPoints
+                );
+
+                while (DebugTrackStore.raw.size()
+                        > MAX_DEBUG_POINTS) {
+
+                    DebugTrackStore.raw.remove(0);
                 }
-                DebugTrackStore.simplifiedCount = DebugTrackStore.simplified.size();
-                // =========================
-                // 📊 INFO
-                // =========================
-                DebugTrackStore.lastSms = res.encoded;
-                DebugTrackStore.smsLength = res.encoded.length();
 
-                DebugTrackStore.smsHistory.add(smsLen);
-                // =========================
-                // 📈 HISTORY LIMITATA
-                // =========================
-                DebugTrackStore.rawHistory.add(workingPoints.size());
-                DebugTrackStore.filteredHistory.add(filteredPoints.size());
-                DebugTrackStore.simplifiedHistory.add(simplifiedPoints.size());
+                while (DebugTrackStore.filtered.size()
+                        > MAX_DEBUG_POINTS) {
+
+                    DebugTrackStore.filtered.remove(0);
+                }
+
+                while (DebugTrackStore.simplified.size()
+                        > MAX_DEBUG_POINTS) {
+
+                    DebugTrackStore.simplified.remove(0);
+                }
+
+                DebugTrackStore.rawCount =
+                        DebugTrackStore.raw.size();
+
+                DebugTrackStore.filteredCount =
+                        DebugTrackStore.filtered.size();
+
+                DebugTrackStore.simplifiedCount =
+                        DebugTrackStore.simplified.size();
+
+                DebugTrackStore.lastSms =
+                        res.encoded;
+
+                DebugTrackStore.smsLength =
+                        res.encoded.length();
+
+                DebugTrackStore.smsHistory.add(
+                        smsLen
+                );
+
+                DebugTrackStore.rawHistory.add(
+                        workingPoints.size()
+                );
+
+                DebugTrackStore.filteredHistory.add(
+                        filteredPoints.size()
+                );
+
+                DebugTrackStore.simplifiedHistory.add(
+                        simplifiedPoints.size()
+                );
+
                 DebugTrackStore.timeHistory.add(now);
 
-                if (DebugTrackStore.rawHistory.size() > MAX_HISTORY) {
+                while (DebugTrackStore.rawHistory.size()
+                        > MAX_HISTORY) {
+
                     DebugTrackStore.rawHistory.remove(0);
+
                     DebugTrackStore.filteredHistory.remove(0);
+
                     DebugTrackStore.simplifiedHistory.remove(0);
+
                     DebugTrackStore.timeHistory.remove(0);
                 }
             }
-            Log.d("ADAPT", "FINAL len=" + res.encoded.length());
 
-            // ================================
-            // 🔥 STATO REALE FLUSH
-            // ================================
-            boolean isRealFinalFlush = isFinalFlush && finalFlushStarted.get();
+            // =================================================
+            // 🔥 FINAL FLUSH STATE
+            // =================================================
+
+            boolean isRealFinalFlush =
+                    isFinalFlush &&
+                            finalFlushStarted.get();
 
             Log.e("FLUSH_REAL",
-                    "isFinalFlush=" + isFinalFlush +
-                            " finalStarted=" + finalFlushStarted.get() +
-                            " => REAL=" + isRealFinalFlush);
-            // ================================
-            // 🚀 COSTRUZIONE SMS AUTONOMI
-            // ================================
+                    "isFinalFlush=" +
+                            isFinalFlush +
+                            " finalStarted=" +
+                            finalFlushStarted.get() +
+                            " => REAL=" +
+                            isRealFinalFlush);
 
-            // ================================
-            // 🚀 SPLIT BASE64 CORRETTO
-            // ================================
+            // =================================================
+            // 🔥 BASE64 PAYLOAD
+            // =================================================
 
-            List<String> parts = new ArrayList<>();
+            List<String> parts =
+                    new ArrayList<>();
 
-            // 🔥 Base64 COMPLETA del track
-            String fullEncoded = Base64.encodeToString(
-                    res.encoded.getBytes(StandardCharsets.UTF_8),
-                    Base64.URL_SAFE | Base64.NO_WRAP
-            );
+            String fullEncoded =
+                    Base64.encodeToString(
+                            res.encoded.getBytes(
+                                    StandardCharsets.UTF_8
+                            ),
+                            Base64.URL_SAFE |
+                                    Base64.NO_WRAP
+                    );
+
             if (segment == null) {
 
                 Log.e("TX_FATAL",
@@ -2656,132 +3719,221 @@ public class TxForegroundService extends Service {
 
                 return;
             }
-            segment.encodedPayload = fullEncoded;
-            // ================================
-            // 📏 DIMENSIONE PAYLOAD
-            // ================================
 
-            // margine sicurezza reale
-
+            segment.encodedPayload =
+                    fullEncoded;
 
             int maxPayloadLen =
                     140
                             - testHeader.length()
-                            - 4   // CRC
-                            - 2;  // separatore
+                            - 4
+                            - 2;
 
-            // split SOLO della stringa Base64
             List<String> payloadChunks =
-                    splitString(fullEncoded, maxPayloadLen);
+                    splitString(
+                            fullEncoded,
+                            maxPayloadLen
+                    );
 
             Log.d("TX_SPLIT",
-                    "chunks=" + payloadChunks.size() +
-                            " totalLen=" + fullEncoded.length());
+                    "chunks=" +
+                            payloadChunks.size() +
+                            " totalLen=" +
+                            fullEncoded.length());
 
-            // ================================
-            // 🚀 COSTRUZIONE SMS
-            // ================================
+            // =================================================
+            // 🔥 SMS BUILD
+            // =================================================
 
-            for (int i = 0; i < payloadChunks.size(); i++) {
+            for (int i = 0;
+                 i < payloadChunks.size();
+                 i++) {
 
-                String payloadChunk = payloadChunks.get(i);
-
-                int seq = i;
+                String payloadChunk =
+                        payloadChunks.get(i);
 
                 boolean isFinal =
                         isRealFinalFlush &&
                                 i == payloadChunks.size() - 1;
 
-                String type = isFinal ? "F" : "D";
+                String type =
+                        isFinal ? "F" : "D";
 
                 String header =
                         "TX|" +
-                                currentSessionId + "|" +
-                                segment.segmentId + "|" +
-                                seq + "/" + payloadChunks.size() + "|" +
-                                type + "|";
+                                currentSessionId +
+                                "|" +
+                                segment.segmentId +
+                                "|" +
+                                i +
+                                "/" +
+                                payloadChunks.size() +
+                                "|" +
+                                type +
+                                "|";
 
-                String full = header + payloadChunk;
+                String full =
+                        header +
+                                payloadChunk;
 
-                String crc = SmsCrc.INSTANCE.crc8(full);
+                String crc =
+                        SmsCrc.INSTANCE.crc8(full);
 
-                String sms = full + "|" + crc;
+                String sms =
+                        full +
+                                "|" +
+                                crc;
 
-                // 🚨 HARD CHECK
                 if (sms.length() > 140) {
 
                     Log.e("SMS_FATAL",
-                            "OVERFLOW seq=" + seq +
-                                    " len=" + sms.length());
+                            "OVERFLOW seq=" +
+                                    i +
+                                    " len=" +
+                                    sms.length());
 
                     continue;
                 }
 
-                Log.d("TX_SMS",
-                        "SEQ=" + seq +
-                                " TYPE=" + type +
-                                " LEN=" + sms.length());
-
                 parts.add(sms);
+
+                Log.d("TX_SMS",
+                        "SEQ=" +
+                                i +
+                                " TYPE=" +
+                                type +
+                                " LEN=" +
+                                sms.length());
             }
-            // ================================
-            // 🔴 VALIDAZIONE FINALE
-            // ================================
+
+            // =================================================
+            // 🔥 VALID SMS CHECK
+            // =================================================
+
             if (parts.isEmpty()) {
-                Log.e("SMS_FATAL", "Nessun SMS valido da inviare");
+
+                Log.e("SMS_FATAL",
+                        "NO VALID SMS");
+
                 return;
             }
-            // ================================
-            // 🔍 DEBUG FORTE
-            // ================================
-            Log.e("TX_DEBUG",
-                    "PARTS size=" + parts.size() +
-                            " final=" + isRealFinalFlush);
-            // ================================
-            // 🚀 INVIO (FIX 4)
-            // ================================
-            enqueueSmsBatch(parts, isRealFinalFlush);
+
+            // =================================================
+// 🚀 INVIO SEQUENZIALE SICURO
+// =================================================
+
+            String sessionSnapshot =
+                    currentSessionId;
+
+            Log.e("SEQ_START",
+                    "START SEND parts=" + parts.size() +
+                            " final=" + isRealFinalFlush +
+                            " session=" + sessionSnapshot);
+
+            txHandler.post(() ->
+                    sendNextPart(
+                            parts,
+                            0,
+                            sessionSnapshot,
+                            isRealFinalFlush
+                    )
+            );
+
             firstBlockSent = true;
 
-            // ================================
-            // 🔥 RESET SOLO SE F REALE
-            // ================================
-            if (isRealFinalFlush) {
-                setFinalFlush(false, "processTrackBuffer RESET");
-            }
             lastTrackSmsTime = now;
-            // ================================
-            // ♻️ ROLLING BUFFER (FIX 3)
-            // ================================
+
+            firstBlockSent = true;
+
+            lastTrackSmsTime = now;
+
+            // =================================================
+// 🔥 RESET FLUSH SOLO REALE
+// =================================================
+
+// ❌ NON RESETTARE QUI
+// il flush finale termina solo
+// quando tutta la queue TX è realmente vuota
+
+/*
+if (isRealFinalFlush) {
+
+    setFinalFlush(
+            false,
+            "processTrackBuffer RESET"
+    );
+}
+*/
+
+            // =================================================
+            // ♻️ BUFFER ROLLING SICURO
+            // =================================================
+
             if (!isRealFinalFlush) {
+
                 synchronized (bufferLock) {
-                    List<GpsPoint> current = gpsTrackBuffer.getPointsCopy();
-                    if (current.isEmpty()) return;
-                    // 🔥 FIX 3 — mantieni più punti (NON solo 1)
-                    int keep = Math.min(20, current.size());
-                    List<GpsPoint> tail = current.subList(
-                            current.size() - keep,
-                            current.size()
-                    );
-                    gpsTrackBuffer.clear();
-                    for (GpsPoint p : tail) {
-                        gpsTrackBuffer.addPoint(p);
+
+                    List<GpsPoint> current =
+                            gpsTrackBuffer.getPointsCopy();
+
+                    if (!current.isEmpty()) {
+
+                        int keep =
+                                Math.min(
+                                        keepPoints,
+                                        current.size()
+                                );
+
+                        List<GpsPoint> tail =
+                                new ArrayList<>(
+                                        current.subList(
+                                                current.size() - keep,
+                                                current.size()
+                                        )
+                                );
+
+                        gpsTrackBuffer.clear();
+
+                        for (GpsPoint p : tail) {
+
+                            gpsTrackBuffer.addPoint(p);
+                        }
+
+                        Log.d("TX_BUFFER",
+                                "KEEP LAST " +
+                                        keep +
+                                        " POINTS");
                     }
-                    Log.d("TX_BUFFER", "KEEP LAST " + keep + " POINTS");
                 }
             }
-            // ================================
-            // 🛑 FINALE
-            // ================================
+
+            // =================================================
+            // 🔥 FINAL COMPLETE
+            // =================================================
+
             if (isRealFinalFlush) {
-                Log.d("TRACK", "FINAL FLUSH COMPLETED");
+
+                Log.e("FINAL_FLUSH",
+                        "FINAL BATCH ENQUEUED");
+
+                // NON completato qui
             }
+
+        } catch (Exception e) {
+
+            Log.e("TRACK_FATAL",
+                    "processTrackBuffer exception",
+                    e);
+
         } finally {
+
             synchronized (processingLock) {
+
                 isProcessing = false;
             }
         }
     }
+
     private void setFinalFlush(boolean value, String from) {
         // 🚨 LOG SOLO QUANDO VIENE ATTIVATO
         if (value) {
@@ -2813,62 +3965,186 @@ public class TxForegroundService extends Service {
     }
     private void stopTrackingInternal() {
 
-        Log.e("STOP_DEBUG", "stopTrackingInternal CALLED", new Exception());
+        Log.e(
+                "STOP_TRACE",
+                "stopTrackingInternal ENTER"
+        );
 
-        // 🔴 stato globale
+        // 🔥 anti doppia esecuzione
+        if (serviceStopping.get()) {
+
+            Log.e("STOP_DEBUG",
+                    "already stopping");
+
+            return;
+        }
+
+        serviceStopping.set(true);
+
         isRunning = false;
 
-        // 🔴 reset restore automatico
+        // =================================================
+        // 🔥 reset restore automatico
+        // =================================================
+
         SharedPreferences prefs =
-                getSharedPreferences("TX_STATE", MODE_PRIVATE);
+                getSharedPreferences(
+                        "TX_STATE",
+                        MODE_PRIVATE
+                );
 
         prefs.edit()
                 .putBoolean("wasRunning", false)
                 .apply();
 
-        // 🔴 stop track handler
-        trackHandler.removeCallbacksAndMessages(null);
+        // =================================================
+        // 🔥 stop handlers
+        // =================================================
+
+        try {
+
+            trackHandler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
+        try {
+
+            handler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
+        try {
+
+            rxMonitorHandler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
+        try {
+
+            smsHandler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
+        try {
+
+            signalHandler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
+        try {
+
+            uiHandler.removeCallbacksAndMessages(null);
+
+        } catch (Exception ignored) {}
+
         trackRunnableScheduled = false;
 
-        // 🔴 pulizia buffer
+        // =================================================
+        // 🔥 clear tx queues
+        // =================================================
+
+        clearTxQueues();
+
+        // =================================================
+        // 🔥 clear buffers
+        // =================================================
+
         synchronized (bufferLock) {
+
             gpsTrackBuffer.clear();
         }
 
-        lastTrackSmsTime = 0;
+        synchronized (processingLock) {
 
-        // 🔴 stop handler generali
-        handler.removeCallbacksAndMessages(null);
-
-        // 🔴 stop RX monitor
-        rxMonitorHandler.removeCallbacksAndMessages(null);
-
-        // 🔴 stop UI
-        if (uiRunnable != null) {
-            uiHandler.removeCallbacks(uiRunnable);
+            isProcessing = false;
         }
 
-        // 🔴 stop GPS
-        if (continuousLocationCallback != null) {
+        // =================================================
+        // 🔥 gps stop
+        // =================================================
 
-            fusedClient.removeLocationUpdates(continuousLocationCallback);
+        try {
 
-            continuousLocationCallback = null;
+            if (continuousLocationCallback != null) {
+
+                fusedClient.removeLocationUpdates(
+                        continuousLocationCallback
+                );
+
+                continuousLocationCallback = null;
+            }
+
+        } catch (Exception e) {
+
+            Log.e("GPS",
+                    "removeLocationUpdates error",
+                    e);
         }
 
-        // 🔴 stop scheduler SMS
-        smsHandler.removeCallbacksAndMessages(null);
+        // =================================================
+        // 🔥 phone listener stop
+        // =================================================
 
-        // 🔴 update UI
-        sendUpdate(TxStatus.IDLE, 0, smsSent);
+        try {
 
-        // 🔴 stop foreground
-        stopForeground(true);
+            if (telephonyManager != null &&
+                    signalListener != null) {
 
-        // 🔴 chiusura service
-        stopSelf();
+                telephonyManager.listen(
+                        signalListener,
+                        PhoneStateListener.LISTEN_NONE
+                );
+            }
 
-        Log.e("STOP_DEBUG", "SERVICE STOPPED");
+        } catch (Exception e) {
+
+            Log.e("SIGNAL",
+                    "listener stop error",
+                    e);
+        }
+
+        // =================================================
+        // 🔥 update UI
+        // =================================================
+
+        sendUpdate(
+                TxStatus.IDLE,
+                0,
+                smsSent
+        );
+
+        // =================================================
+        // 🔥 foreground stop
+        // =================================================
+
+        try {
+
+            stopForeground(true);
+
+        } catch (Exception ignored) {}
+
+        // =================================================
+        // 🔥 final cleanup
+        // =================================================
+
+        //completeFinalFlush();
+
+        trackLoopActive.set(false);
+
+        queueProcessing.set(false);
+
+        // =================================================
+        // 🔥 stop service
+        // =================================================
+
+        try {
+
+            stopSelf();
+
+        } catch (Exception ignored) {}
+
+        Log.e("STOP_DEBUG",
+                "SERVICE STOPPED");
     }
     private void sendRxStatus(boolean alive) {
         Intent intent = new Intent(ACTION_UPDATE);
@@ -2994,21 +4270,37 @@ public class TxForegroundService extends Service {
         Log.d("TX_SERVICE", "Signal monitor started");
     }
     private void sendSignalUpdate(int dbm) {
+
         String networkType = getNetworkType();
+
         NetworkState state;
-        if (!networkAvailable) {
+
+        boolean validSignal =
+                (dbm <= -50 && dbm >= -130);
+
+        if (!validSignal) {
+
             state = NetworkState.NO_SIGNAL;
+
         } else if (dbm < -100) {
+
             state = NetworkState.WEAK_SIGNAL;
+
         } else {
+
             state = NetworkState.ONLINE;
         }
+
         currentNetworkState = state;
+
         Intent intent = new Intent("NETWORK_UPDATE");
-        intent.setPackage(getPackageName()); // ? FONDAMENTALE
+
+        intent.setPackage(getPackageName());
+
         intent.putExtra("dbm", dbm);
         intent.putExtra("type", networkType);
         intent.putExtra("state", state.name());
+
         sendBroadcast(intent);
     }
     private void saveAdaptiveReport(AdaptiveSession session, AdaptiveConfig newConfig) {
