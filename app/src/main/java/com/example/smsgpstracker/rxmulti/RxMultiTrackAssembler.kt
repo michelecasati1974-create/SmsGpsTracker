@@ -1,90 +1,103 @@
-// RxMultiTrackAssembler.kt
 package com.example.smsgpstracker.rxmulti
 
 import android.util.Base64
 import android.util.Log
 import com.example.smsgpstracker.tx.PolylineCodec
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 
 class RxMultiTrackAssembler {
 
-    // =====================================================
-    // SEGMENT BUFFER
-    // =====================================================
+    //======================================================
+    // SEGMENT
+    //======================================================
 
     data class SegmentBuffer(
 
         val chunks:
-        MutableMap<Int, String> = mutableMapOf(),
+        MutableMap<Int,String> =
+            mutableMapOf(),
 
-        var totalChunks: Int = -1,
+        var totalChunks:Int=-1,
 
-        var finalReceived: Boolean = false,
+        var startPointId:Long=-1,
 
-        var completed: Boolean = false,
+        var endPointId:Long=-1,
 
-        var rebuildDone: Boolean = false,
+        var finalReceived:Boolean=false,
 
-        var lastUpdate: Long =
+        var completed:Boolean=false,
+
+        var rebuildDone:Boolean=false,
+
+        var lastUpdate:Long=
             System.currentTimeMillis()
     )
 
-    // =====================================================
-    // SESSION BUFFER
-    // =====================================================
+    //======================================================
+    // SESSION
+    //======================================================
 
     data class SessionBuffer(
 
         val segments:
-        MutableMap<Long, SegmentBuffer> = mutableMapOf(),
+        MutableMap<Long,SegmentBuffer> =
+            mutableMapOf(),
 
         val fullTrack:
-        MutableList<Pair<Double, Double>> = mutableListOf(),
+        MutableList<Pair<Double,Double>> =
+            mutableListOf(),
 
         var lastPoint:
-        Pair<Double, Double>? = null,
+        Pair<Double,Double>?=
+            null,
 
-        var finalReceived: Boolean = false,
+        var lastEndPointId:Long=-1,
 
-        var finalSegmentId: Long = -1L
+        var finalReceived:Boolean=false,
+
+        var finalSegmentId:Long=-1
     )
 
-    // =====================================================
+    //======================================================
 
     private val sessions =
-        ConcurrentHashMap<String, SessionBuffer>()
+        ConcurrentHashMap<
+                String,
+                SessionBuffer>()
 
-    // =====================================================
+    //======================================================
     // PROCESS
-    // =====================================================
+    //======================================================
 
-    fun process(packet: RxMultiSmsPacket) {
+    fun process(
+        packet:
+        RxMultiSmsPacket
+    ) {
 
         cleanupOldSessions()
 
-        val sessionId =
-            packet.sessionId
-
-        val segmentId =
-            packet.segmentId
-
         val session =
-            sessions.getOrPut(sessionId) {
+            sessions.getOrPut(
+                packet.sessionId
+            ) {
 
                 Log.e(
-                    "ASM_SESSION",
-                    "NEW SESSION $sessionId"
+                    "ASM",
+                    "NEW SESSION"
                 )
 
                 SessionBuffer()
             }
 
         val segment =
-            session.segments.getOrPut(segmentId) {
+            session.segments.getOrPut(
+                packet.segmentId
+            ) {
 
                 Log.e(
-                    "ASM_SEGMENT",
-                    "NEW SEGMENT $segmentId"
+                    "ASM",
+                    "NEW SEGMENT ${packet.segmentId}"
                 )
 
                 SegmentBuffer()
@@ -93,111 +106,91 @@ class RxMultiTrackAssembler {
         segment.lastUpdate =
             System.currentTimeMillis()
 
-        // =================================================
-        // DUPLICATE PROTECTION
-        // =================================================
-
-        if (segment.chunks.containsKey(packet.seq)) {
+        if (
+            segment.chunks.containsKey(
+                packet.seq
+            )
+        ) {
 
             Log.d(
                 "ASM_DUP",
-                "segment=$segmentId seq=${packet.seq}"
+                "DROP DUP"
             )
 
             return
         }
 
-        // =================================================
-        // STORE CHUNK
-        // =================================================
-
-        segment.chunks[packet.seq] =
+        segment.chunks[
+            packet.seq
+        ] =
             packet.payloadChunk
 
         segment.totalChunks =
             packet.total
 
-        // =================================================
-        // FINAL FLAG
-        // =================================================
+        segment.startPointId =
+            packet.startPointId
 
-        if (packet.type == "F") {
+        segment.endPointId =
+            packet.endPointId
 
-            segment.finalReceived = true
+        if (
+            packet.type=="F"
+        ) {
+
+            segment.finalReceived =
+                true
 
             session.finalSegmentId =
-                segmentId
-
-            Log.e(
-                "ASM_FINAL",
-                "FINAL FLAG segment=$segmentId"
-            )
+                packet.segmentId
         }
 
-        Log.d(
-            "ASM_STORE",
-            "segment=$segmentId seq=${packet.seq}/${packet.total}"
-        )
-
-        // =================================================
-        // SEGMENT COMPLETE?
-        // =================================================
-
-        if (!isSegmentComplete(segment)) {
-
-            Log.d(
-                "ASM_WAIT",
-                "segment=$segmentId incomplete"
+        if (
+            !isSegmentComplete(
+                segment
             )
+        ) {
 
             return
         }
 
-        // =================================================
-        // REBUILD ONLY ONCE
-        // =================================================
-
-        if (segment.rebuildDone) {
-
-            Log.d(
-                "ASM_SKIP",
-                "segment=$segmentId already rebuilt"
-            )
+        if (
+            segment.rebuildDone
+        ) {
 
             return
         }
-
-        segment.rebuildDone = true
 
         rebuildSegment(
-            sessionId,
             session,
-            segmentId,
             segment
         )
     }
 
-    // =====================================================
-    // COMPLETE CHECK
-    // =====================================================
+    //======================================================
 
     private fun isSegmentComplete(
-        segment: SegmentBuffer
-    ): Boolean {
+        segment:
+        SegmentBuffer
+    ):Boolean {
 
-        if (segment.totalChunks <= 0) {
+        if (
+            segment.totalChunks<=0
+        ) {
 
             return false
         }
 
-        for (i in 0 until segment.totalChunks) {
+        for (
+        i in 0 until
+                segment.totalChunks
+        ) {
 
-            if (!segment.chunks.containsKey(i)) {
-
-                Log.w(
-                    "ASM_MISSING",
-                    "missing seq=$i"
+            if (
+                !segment.chunks.containsKey(
+                    i
                 )
+            ) {
 
                 return false
             }
@@ -206,93 +199,78 @@ class RxMultiTrackAssembler {
         return true
     }
 
-    // =====================================================
-    // REBUILD SEGMENT
-    // =====================================================
+    //======================================================
 
     private fun rebuildSegment(
-        sessionId: String,
-        session: SessionBuffer,
-        segmentId: Long,
-        segment: SegmentBuffer
+
+        session:
+        SessionBuffer,
+
+        segment:
+        SegmentBuffer
+
     ) {
 
         try {
 
+            segment.rebuildDone =
+                true
+
+            if (
+                session.lastEndPointId>0 &&
+                segment.startPointId>
+                session.lastEndPointId+5
+            ) {
+
+                Log.e(
+                    "ASM_GAP",
+                    "DROP DISCONTINUITY"
+                )
+
+                return
+            }
+
             val builder =
                 StringBuilder()
 
-            // =============================================
-            // ORDER CHUNKS
-            // =============================================
-
-            for (i in 0 until segment.totalChunks) {
+            for (
+            i in 0 until
+                    segment.totalChunks
+            ) {
 
                 val chunk =
                     segment.chunks[i]
+                        ?: return
 
-                if (chunk == null) {
-
-                    Log.e(
-                        "ASM_NULL",
-                        "NULL chunk seq=$i"
-                    )
-
-                    return
-                }
-
-                builder.append(chunk)
+                builder.append(
+                    chunk
+                )
             }
 
-            val fullBase64 =
-                builder.toString()
-
-            Log.e(
-                "ASM_REBUILD",
-                "segment=$segmentId len=${fullBase64.length}"
-            )
-
-            Log.e(
-                "ASM_SEGMENTS",
-                "session=$sessionId segments=${session.segments.keys.sorted()}"
-            )
-
-            // =============================================
-            // BASE64 DECODE
-            // =============================================
-
-            val decodedBytes =
-                Base64.decode(
-                    fullBase64,
-                    Base64.URL_SAFE or Base64.NO_WRAP
-                )
-
-            val encodedPolyline =
+            val decoded =
                 String(
-                    decodedBytes,
+
+                    Base64.decode(
+
+                        builder.toString(),
+
+                        Base64.URL_SAFE
+                                or
+                                Base64.NO_WRAP
+
+                    ),
+
                     Charsets.UTF_8
                 )
 
-            Log.d(
-                "ASM_POLY",
-                "polylineLen=${encodedPolyline.length}"
-            )
-
-            // =============================================
-            // POLYLINE DECODE
-            // =============================================
-
             val points =
                 PolylineCodec.decode(
-                    encodedPolyline
+                    decoded
                 )
 
-            if (points.isEmpty()) {
-
-                Log.e(
-                    "ASM_EMPTY",
-                    "decoded points EMPTY"
-                )
+            if (
+                points.isEmpty()
+            ) {
 
                 return
             }
@@ -302,240 +280,208 @@ class RxMultiTrackAssembler {
                 points
             )
 
-            segment.completed = true
+            session.lastEndPointId =
+                segment.endPointId
+
+            segment.completed =
+                true
+
+            if (
+                segment.finalReceived
+            ) {
+
+                session.finalReceived =
+                    true
+            }
 
             Log.e(
                 "ASM_OK",
-                "segment=$segmentId points=${points.size}"
+
+                "points=${session.fullTrack.size}"
             )
 
-            // =============================================
-            // FINAL COMPLETE
-            // =============================================
+        }
 
-            if (segment.finalReceived) {
-
-                session.finalReceived = true
-
-                Log.e(
-                    "ASM_FINAL_OK",
-                    "FINAL TRACK COMPLETE"
-                )
-            }
-
-        } catch (e: Exception) {
+        catch (
+            e:Exception
+        ) {
 
             Log.e(
-                "ASM_REBUILD_ERR",
-                "segment=$segmentId",
+                "ASM_ERR",
+                "rebuild",
                 e
             )
 
-            segment.rebuildDone = false
+            segment.rebuildDone =
+                false
         }
     }
 
-    // =====================================================
-    // APPEND SAFE
-    // =====================================================
+    //======================================================
 
     private fun appendPoints(
-        session: SessionBuffer,
-        newPoints: List<Pair<Double, Double>>
+
+        session:
+        SessionBuffer,
+
+        points:
+        List<Pair<Double,Double>>
+
     ) {
 
-        if (newPoints.isEmpty()) {
-
-            return
-        }
-
-        val cleaned =
-            mutableListOf<Pair<Double, Double>>()
-
-        var lastLocal:
-                Pair<Double, Double>? = null
-
-        // =================================================
-        // LOCAL DEDUP
-        // =================================================
-
-        for (p in newPoints) {
-
-            if (
-                lastLocal != null &&
-                kotlin.math.abs(
-                    lastLocal.first - p.first
-                ) < 1e-6 &&
-                kotlin.math.abs(
-                    lastLocal.second - p.second
-                ) < 1e-6
-            ) {
-
-                continue
-            }
-
-            cleaned.add(p)
-
-            lastLocal = p
-        }
-
-        Log.e(
-            "ASM_APPEND_DEBUG",
-            "before=${session.fullTrack.size} add=${cleaned.size}"
-        )
-
-        // =================================================
-        // GLOBAL DEDUP
-        // =================================================
-
-        for (p in cleaned) {
+        for (
+        p in points
+        ) {
 
             val last =
-                session.fullTrack.lastOrNull()
+                session.fullTrack
+                    .lastOrNull()
 
             if (
-                last != null &&
-                kotlin.math.abs(
-                    last.first - p.first
-                ) < 1e-6 &&
-                kotlin.math.abs(
-                    last.second - p.second
-                ) < 1e-6
+
+                last!=null &&
+
+                abs(
+                    last.first-
+                            p.first
+                )<1e-6 &&
+
+                abs(
+                    last.second-
+                            p.second
+                )<1e-6
+
             ) {
 
                 continue
             }
 
-            session.fullTrack.add(p)
+            session.fullTrack.add(
+                p
+            )
         }
 
         session.lastPoint =
-            session.fullTrack.lastOrNull()
-
-        Log.e(
-            "ASM_APPEND_DEBUG",
-            "after=${session.fullTrack.size}"
-        )
-
-        Log.e(
-            "ASM_APPEND",
-            "total=${session.fullTrack.size}"
-        )
+            session.fullTrack
+                .lastOrNull()
     }
 
-    // =====================================================
-    // GET TRACK
-    // =====================================================
+    //======================================================
 
     fun getFullTrack(
-        sessionId: String
-    ): List<Pair<Double, Double>> {
+        sessionId:String
+    ):List<Pair<Double,Double>> {
 
-        val session =
-            sessions[sessionId]
-                ?: return emptyList()
+        return sessions[
+            sessionId
+        ]
+            ?.fullTrack
+            ?.toList()
 
-        return session.fullTrack.toList()
+            ?: emptyList()
     }
 
-    // =====================================================
-    // FINAL TRACK
-    // =====================================================
+    //======================================================
 
     fun buildFinalTrack(
-        sessionId: String
-    ): List<Pair<Double, Double>>? {
+        sessionId:String
+    ):List<Pair<Double,Double>>? {
 
         val session =
-            sessions[sessionId]
+            sessions[
+                sessionId
+            ]
+
                 ?: return null
 
-        if (!session.finalReceived) {
-
-            Log.w(
-                "ASM_FINAL_WAIT",
-                "final not received"
-            )
+        if (
+            !session.finalReceived
+        ) {
 
             return null
         }
 
-        return session.fullTrack.toList()
+        return session.fullTrack
+            .toList()
     }
 
-    // =====================================================
-    // COMPLETE
-    // =====================================================
+    //======================================================
 
     fun isComplete(
-        sessionId: String
-    ): Boolean {
+        sessionId:String
+    ):Boolean {
 
-        val session =
-            sessions[sessionId]
-                ?: return false
+        return sessions[
+            sessionId
+        ]
 
-        return session.finalReceived
+            ?.finalReceived
+
+            ?: false
     }
 
-    // =====================================================
-    // CLEANUP
-    // =====================================================
+    //======================================================
 
     private fun cleanupOldSessions() {
 
         val now =
             System.currentTimeMillis()
 
-        val iterator =
-            sessions.entries.iterator()
+        val it =
+            sessions.entries
+                .iterator()
 
-        while (iterator.hasNext()) {
+        while (
+            it.hasNext()
+        ) {
 
-            val entry =
-                iterator.next()
+            val e =
+                it.next()
 
-            val session =
-                entry.value
+            var newest =
+                0L
 
-            var newest = 0L
-
-            for (segment in session.segments.values) {
+            for (
+            s in
+            e.value
+                .segments
+                .values
+            ) {
 
                 newest =
                     maxOf(
                         newest,
-                        segment.lastUpdate
+                        s.lastUpdate
                     )
             }
 
-            // 🔥 12 ORE
             if (
-                newest > 0 &&
-                now - newest > 12 * 60 * 60 * 1000
+
+                newest>0 &&
+
+                now-newest
+                >
+                12L*
+                60*
+                60*
+                1000
+
             ) {
 
-                Log.w(
-                    "ASM_CLEAN",
-                    "remove session=${entry.key}"
-                )
-
-                iterator.remove()
+                it.remove()
             }
         }
     }
 
-    // =====================================================
-    // RESET
-    // =====================================================
+    //======================================================
 
     fun reset() {
 
         sessions.clear()
 
         Log.e(
-            "ASM_RESET",
-            "RESET COMPLETO"
+            "ASM",
+            "RESET"
         )
     }
 }

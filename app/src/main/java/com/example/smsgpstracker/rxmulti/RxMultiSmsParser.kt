@@ -5,9 +5,14 @@ import com.example.smsgpstracker.SmsCrc
 
 class RxMultiSmsParser {
 
-    fun parse(sms: String): RxMultiSmsPacket? {
+    fun parse(
+        sms: String
+    ): RxMultiSmsPacket? {
 
-        Log.d("PARSER_IN", "RAW=[$sms]")
+        Log.d(
+            "PARSER_IN",
+            "RAW=[$sms]"
+        )
 
         if (!sms.startsWith("TX|")) {
             return null
@@ -16,12 +21,19 @@ class RxMultiSmsParser {
         // =====================================================
         // NUOVO FORMATO:
         //
-        // TX|session|segmentId|seq/total|type|payload|crc
+        // TX|session|segment|startPoint|endPoint|
+        // seq/total|type|payload|crc
         // =====================================================
 
-        val parts = sms.split('|', limit = 7)
+        val parts =
+            sms.split(
+                '|',
+                limit = 9
+            )
 
-        if (parts.size != 7) {
+        if (
+            parts.size != 9
+        ) {
 
             Log.e(
                 "PARSER_ERR",
@@ -33,15 +45,25 @@ class RxMultiSmsParser {
 
         try {
 
-            val sessionId = parts[1]
+            val sessionId =
+                parts[1]
 
             val segmentId =
                 parts[2].toLong()
 
-            val seqParts =
-                parts[3].split('/')
+            val startPointId =
+                parts[3].toLong()
 
-            if (seqParts.size != 2) {
+            val endPointId =
+                parts[4].toLong()
+
+            val seqParts =
+                parts[5]
+                    .split('/')
+
+            if (
+                seqParts.size != 2
+            ) {
 
                 Log.e(
                     "PARSER_ERR",
@@ -52,50 +74,114 @@ class RxMultiSmsParser {
             }
 
             val seq =
-                seqParts[0].toInt()
+                seqParts[0]
+                    .toInt()
 
             val total =
-                seqParts[1].toInt()
+                seqParts[1]
+                    .toInt()
 
-            val type = parts[4]
+            val type =
+                parts[6]
 
-            val payload = parts[5]
+            val payload =
+                parts[7]
 
             val crc =
-                parts[6].trim()
+                parts[8]
+                    .trim()
 
             // =================================================
             // CRC CHECK
             // =================================================
 
             val raw =
+
                 "TX|" +
-                        sessionId + "|" +
-                        segmentId + "|" +
-                        seq + "/" + total + "|" +
-                        type + "|" +
+
+                        sessionId +
+
+                        "|" +
+
+                        segmentId +
+
+                        "|" +
+
+                        startPointId +
+
+                        "|" +
+
+                        endPointId +
+
+                        "|" +
+
+                        seq +
+
+                        "/" +
+
+                        total +
+
+                        "|" +
+
+                        type +
+
+                        "|" +
+
                         payload
 
             val calc =
                 SmsCrc.crc8(raw)
 
-            if (!calc.equals(crc, true)) {
+            if (
+                !calc.equals(
+                    crc,
+                    true
+                )
+            ) {
 
                 Log.e(
                     "PARSER_CRC_FAIL",
-                    "seq=$seq calc=$calc rx=$crc"
+                    "segment=$segmentId " +
+                            "seq=$seq " +
+                            "calc=$calc " +
+                            "rx=$crc"
                 )
 
                 return null
             }
 
+            Log.d(
+                "PARSER_OK",
+                "seg=$segmentId " +
+                        "points=$startPointId->$endPointId " +
+                        "seq=$seq/$total"
+            )
+
             return RxMultiSmsPacket(
-                sessionId = sessionId,
-                seq = seq,
-                total = total,
-                type = type,
-                payloadChunk = payload,
-                segmentId = segmentId
+
+                sessionId =
+                    sessionId,
+
+                segmentId =
+                    segmentId,
+
+                startPointId =
+                    startPointId,
+
+                endPointId =
+                    endPointId,
+
+                seq =
+                    seq,
+
+                total =
+                    total,
+
+                type =
+                    type,
+
+                payloadChunk =
+                    payload
             )
 
         } catch (e: Exception) {

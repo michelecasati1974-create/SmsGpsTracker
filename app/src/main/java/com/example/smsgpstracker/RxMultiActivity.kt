@@ -38,6 +38,8 @@ import android.provider.MediaStore
 import android.net.Uri
 import java.io.OutputStream
 import android.content.ContentValues
+import java.io.BufferedWriter
+import java.io.OutputStreamWriter
 
 
 
@@ -185,7 +187,11 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                     Log.e(
                         "RX_FLOW",
-                        "PARSE OK seg=${packet.segmentId} seq=${packet.seq} type=${packet.type}"
+                        "PARSE OK " +
+                                "seg=${packet.segmentId} " +
+                                "pts=${packet.startPointId}-${packet.endPointId} " +
+                                "seq=${packet.seq}/${packet.total} " +
+                                "type=${packet.type}"
                     )
 
                     // =========================
@@ -266,7 +272,9 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     }
 
                     txtCount.text =
-                        "SEG ${packet.segmentId} • SEQ ${packet.seq}"
+                        "SEG ${packet.segmentId} • " +
+                                "PTS ${packet.startPointId}-${packet.endPointId} • " +
+                                "SEQ ${packet.seq}/${packet.total}"
 
 
                     // =========================
@@ -283,7 +291,9 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                         Log.e(
                             "RX_FINAL",
-                            "TRACK COMPLETA seg=${packet.segmentId}"
+                            "TRACK COMPLETA " +
+                                    "segment=${packet.segmentId} " +
+                                    "endPoint=${packet.endPointId}"
                         )
 
                         val finalTrack =
@@ -1056,7 +1066,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
                     else -> {
 
                         paintCircle.color = Color.BLACK
-                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 9f, paintCircle)
+                        canvas.drawCircle(point.x.toFloat(), point.y.toFloat(), 4f, paintCircle)
 
                         // etichetta ogni 5 punti
                         if (index % 5 == 0) {
@@ -1172,16 +1182,17 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
         val paint = Paint().apply {
             color = Color.BLACK
-            textSize = 24f
+            textSize = 42f
             isAntiAlias = true
-            setShadowLayer(3f, 1f, 1f, Color.WHITE)
+            isFakeBoldText = true
+            setShadowLayer(4f, 2f, 2f, Color.WHITE)
         }
 
-        var y = bitmap.height.toFloat() - 120f
+        var y = bitmap.height.toFloat() - 220f
 
         text.split("\n").forEach {
             canvas.drawText(it, 30f, y, paint)
-            y += 28f
+            y += 48f
         }
     }
     private fun generateFileName(lat: Double?, lon: Double?): String {
@@ -1265,8 +1276,133 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
             Log.d("SNAPSHOT", "SALVATO OK: $filename")
 
+            saveTrackAsGpx()
+
         } catch (e: Exception) {
             Log.e("SNAPSHOT", "ERRORE SALVATAGGIO", e)
         }
     }
+    private fun saveTrackAsGpx() {
+
+        try {
+
+            if (trackPoints.isEmpty()) {
+                Log.e("GPX", "Track vuota")
+                return
+            }
+
+            val lastPoint = trackPoints.lastOrNull()
+
+            val lat = lastPoint?.latitude
+            val lon = lastPoint?.longitude
+
+            val filename =
+                generateFileName(lat, lon)
+                    .replace(".jpg", ".gpx")
+
+            val gpx = StringBuilder()
+
+            gpx.append("""<?xml version="1.0" encoding="UTF-8"?>""")
+            gpx.append("\n")
+
+            gpx.append("""
+<gpx version="1.1"
+creator="SMSTracker"
+xmlns="http://www.topografix.com/GPX/1/1">
+""".trimIndent())
+
+            gpx.append("\n<trk>\n")
+            gpx.append("<name>SMSTracker Track</name>\n")
+            gpx.append("<trkseg>\n")
+
+            trackPoints.forEach { point ->
+
+                gpx.append(
+                    """
+<trkpt lat="${point.latitude}" lon="${point.longitude}"></trkpt>
+""".trimIndent()
+                )
+
+                gpx.append("\n")
+            }
+
+            gpx.append("</trkseg>\n")
+            gpx.append("</trk>\n")
+            gpx.append("</gpx>\n")
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+                val resolver = contentResolver
+
+                val contentValues = ContentValues().apply {
+
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+
+                    put(
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        "application/gpx+xml"
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        "Pictures/SMSTracker"
+                    )
+                }
+
+                val uri = resolver.insert(
+                    MediaStore.Files.getContentUri("external"),
+                    contentValues
+                )
+
+                uri?.let {
+
+                    resolver.openOutputStream(it)?.use { output ->
+
+                        BufferedWriter(
+                            OutputStreamWriter(output)
+                        ).use { writer ->
+
+                            writer.write(gpx.toString())
+                        }
+                    }
+                }
+
+            } else {
+
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_PICTURES
+                    ),
+                    "SMSTracker"
+                )
+
+                if (!dir.exists()) {
+                    dir.mkdirs()
+                }
+
+                val file = File(dir, filename)
+
+                BufferedWriter(
+                    FileOutputStream(file).writer()
+                ).use { writer ->
+
+                    writer.write(gpx.toString())
+                }
+
+                sendBroadcast(
+                    Intent(
+                        Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
+                        Uri.fromFile(file)
+                    )
+                )
+            }
+
+            Log.d("GPX", "GPX SALVATO: $filename")
+
+        } catch (e: Exception) {
+
+            Log.e("GPX", "ERRORE GPX", e)
+        }
+    }
+
 }

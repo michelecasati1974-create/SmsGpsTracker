@@ -40,6 +40,8 @@ import android.os.Build;
 import androidx.core.content.ContextCompat;
 import android.app.Activity;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Iterator;
+
 
 public class TxForegroundService extends Service {
 
@@ -120,6 +122,7 @@ public class TxForegroundService extends Service {
     private String phoneNumber = "";
     private long cycleStartTime = 0;
     private long nextTickTime = 0;
+    private long lastSentPointId = -1;
     private HandlerThread txThread = new HandlerThread("TX_SMS");
     private Handler txHandler;
     private boolean firstBlockSent = false;
@@ -192,19 +195,31 @@ public class TxForegroundService extends Service {
     private static class SmsBatch {
 
         List<String> parts;
+
         boolean finalBatch;
+
         String sessionId;
-        long createdAt;
+
+        long segmentId;
 
         SmsBatch(
                 List<String> parts,
                 boolean finalBatch,
-                String sessionId
+                String sessionId,
+                long segmentId
         ) {
-            this.parts = parts;
-            this.finalBatch = finalBatch;
-            this.sessionId = sessionId;
-            this.createdAt = System.currentTimeMillis();
+
+            this.parts =
+                    parts;
+
+            this.finalBatch =
+                    finalBatch;
+
+            this.sessionId =
+                    sessionId;
+
+            this.segmentId =
+                    segmentId;
         }
     }
 
@@ -335,16 +350,27 @@ public class TxForegroundService extends Service {
                 return;
             }
 
-            SmsBatch batch = smsQueue.poll();
+            SmsBatch batch =
+                    smsQueue.poll();
 
             if (batch == null) {
+
+                Log.d(
+                        "SMS_QUEUE",
+                        "NO BATCH"
+                );
+
                 return;
             }
 
             queueProcessing.set(true);
 
-            Log.d("SMS_QUEUE",
-                    "PROCESS batch final=" + batch.finalBatch);
+            Log.d(
+                    "SMS_QUEUE",
+                    "PROCESS batch final="
+                            +
+                            batch.finalBatch
+            );
 
             txHandler.post(() -> {
 
@@ -354,15 +380,19 @@ public class TxForegroundService extends Service {
                             batch.parts,
                             0,
                             batch.sessionId,
+                            batch.segmentId,
                             batch.finalBatch
                     );
 
                 } catch (Exception e) {
 
-                    Log.e("SMS_QUEUE",
+                    Log.e(
+                            "SMS_QUEUE",
                             "PROCESS ERROR",
-                            e);
+                            e
+                    );
 
+                    queueProcessing.set(false);
                 }
             });
         }
@@ -376,7 +406,6 @@ public class TxForegroundService extends Service {
                         " finalSmsSent=" + finalSmsSent
         );
     }
-
 // ================================
 // 🔥 TX CLEANUP
 // ================================
@@ -421,41 +450,86 @@ public class TxForegroundService extends Service {
     }
     private void enqueueSmsBatch(
             List<String> parts,
+            long segmentId,
             boolean isFinal
     ) {
 
-        if (parts == null || parts.isEmpty()) {
+        if (parts == null ||
+                parts.isEmpty()) {
 
-            Log.e("SMS_QUEUE",
-                    "enqueue aborted → empty batch");
+            Log.e(
+                    "SMS_QUEUE",
+                    "enqueue aborted → empty batch"
+            );
 
             return;
         }
 
         synchronized (txQueueLock) {
 
-            if (smsQueue.size() > MAX_QUEUE_SIZE) {
+            if (
+                    smsQueue.size()
+                            >
+                            MAX_QUEUE_SIZE
+            ) {
 
-                Log.e("SMS_QUEUE",
-                        "QUEUE OVERFLOW → clear");
+                Log.e(
+                        "SMS_QUEUE",
+                        "QUEUE OVERFLOW → clear"
+                );
 
                 smsQueue.clear();
             }
 
-            SmsBatch batch = new SmsBatch(
-                    new ArrayList<>(parts),
-                    isFinal,
-                    currentSessionId
+            SmsBatch batch =
+                    new SmsBatch(
+                            new ArrayList<>(parts),
+                            isFinal,
+                            currentSessionId,
+                            segmentId
+                    );
+
+            smsQueue.add(
+                    batch
             );
 
-            smsQueue.add(batch);
+            Log.d(
+                    "SMS_QUEUE",
 
-            Log.d("SMS_QUEUE",
-                    "ENQUEUE batch size=" + parts.size() +
-                            " final=" + isFinal +
-                            " queue=" + smsQueue.size());
+                    "ENQUEUE batch size="
 
-            if (!queueProcessing.get()) {
+                            +
+
+                            parts.size()
+
+                            +
+
+                            " final="
+
+                            +
+
+                            isFinal
+
+                            +
+
+                            " segment="
+
+                            +
+
+                            segmentId
+
+                            +
+
+                            " queue="
+
+                            +
+
+                            smsQueue.size()
+            );
+
+            if (
+                    !queueProcessing.get()
+            ) {
 
                 processNextBatch();
             }
@@ -2143,6 +2217,7 @@ public class TxForegroundService extends Service {
 
         enqueueSmsBatch(
                 single,
+                0L,
                 text.contains("|F|")
         );
     }
@@ -2583,14 +2658,17 @@ public class TxForegroundService extends Service {
     private void sendNextPart(
             List<String> parts,
             int index,
-            String sessionSnapshot,
-            boolean finalBatch
-    ){
+            String sessionId,
+            long segmentId,
+            boolean stopPending
+    ) {
 
         if (parts == null || parts.isEmpty()) {
 
-            Log.e("SEQ",
-                    "empty parts");
+            Log.e(
+                    "SEQ",
+                    "empty parts"
+            );
 
             return;
         }
@@ -2601,32 +2679,74 @@ public class TxForegroundService extends Service {
 
         if (index >= parts.size()) {
 
-            Log.e("SEQ_END",
-                    "ALL PARTS SENT");
+            Log.e(
+                    "SEQ_END",
+                    "ALL PARTS SENT"
+            );
 
             queueProcessing.set(false);
+
+            TrackSegment completed =
+                    pendingSegments.get(
+                            segmentId
+                    );
+
+            if (completed != null) {
+
+                completed.acknowledged = true;
+
+                lastSentPointId =
+                        Math.max(
+                                lastSentPointId,
+                                completed.endPointId
+                        );
+
+                Log.d(
+                        "TX_ACK",
+                        "ACK endPoint="
+                                +
+                                lastSentPointId
+                );
+            }
 
             processNextBatch();
 
             if (stopPending) {
 
-                Log.e("STOP_FLOW",
-                        "FINAL BATCH COMPLETE → STOP SERVICE");
+                Log.e(
+                        "STOP_FLOW",
+                        "FINAL BATCH COMPLETE → STOP SERVICE"
+                );
 
-                stopPending = false;
-
-                sessionEndTime = System.currentTimeMillis();
+                sessionEndTime =
+                        System.currentTimeMillis();
 
                 try {
+
                     saveSmsLog();
+
                 } catch (Exception e) {
-                    Log.e("STOP_FLOW", "saveSmsLog error", e);
+
+                    Log.e(
+                            "STOP_FLOW",
+                            "saveSmsLog error",
+                            e
+                    );
                 }
 
                 try {
-                    saveTxState("IDLE");
+
+                    saveTxState(
+                            "IDLE"
+                    );
+
                 } catch (Exception e) {
-                    Log.e("STOP_FLOW", "saveTxState error", e);
+
+                    Log.e(
+                            "STOP_FLOW",
+                            "saveTxState error",
+                            e
+                    );
                 }
 
                 stopTrackingInternal();
@@ -2639,10 +2759,12 @@ public class TxForegroundService extends Service {
         // 🔥 SESSION CHANGED
         // =====================================================
 
-        if (!sessionSnapshot.equals(currentSessionId)) {
+        if (!sessionId.equals(currentSessionId)) {
 
-            Log.w("SEQ",
-                    "DROP → session changed");
+            Log.w(
+                    "SEQ",
+                    "DROP → session changed"
+            );
 
             return;
         }
@@ -2653,8 +2775,10 @@ public class TxForegroundService extends Service {
 
         if (serviceStopping.get()) {
 
-            Log.e("SEQ",
-                    "STOPPING ACTIVE");
+            Log.e(
+                    "SEQ",
+                    "STOPPING ACTIVE"
+            );
 
             return;
         }
@@ -2665,42 +2789,74 @@ public class TxForegroundService extends Service {
 
         if (finalSmsSent) {
 
-            Log.e("SEQ",
-                    "BLOCKED → finalSmsSent=true");
+            Log.e(
+                    "SEQ",
+                    "BLOCKED → finalSmsSent=true"
+            );
 
             return;
         }
 
-        final int currentIndex = index;
+        final int currentIndex =
+                index;
 
-        String sms = parts.get(currentIndex);
+        String sms =
+                parts.get(
+                        currentIndex
+                );
 
         // =====================================================
         // 🔥 FINAL DETECTION
         // =====================================================
 
         boolean isFinal =
-                finalBatch &&
-                        currentIndex == parts.size() - 1;
 
-        Log.e("SMS_SEND_REAL",
-                "SENDING [" +
-                        currentIndex +
-                        "/" +
-                        parts.size() +
-                        "] → " +
-                        sms);
+                stopPending
+                        &&
+
+                        currentIndex
+                                ==
+                                parts.size() - 1;
+
+        Log.e(
+                "SMS_SEND_REAL",
+                "SENDING ["
+                        +
+                        currentIndex
+                        +
+                        "/"
+                        +
+                        parts.size()
+                        +
+                        "]"
+        );
 
         // =====================================================
         // 🔥 RETRY KEY
         // =====================================================
 
         String retryKey =
-                currentSessionId +
-                        "_" +
+
+                sessionId
+
+                        +
+
+                        "_"
+
+                        +
+
+                        segmentId
+
+                        +
+
+                        "_"
+
+                        +
+
                         currentIndex;
 
         int retry =
+
                 retryMap.getOrDefault(
                         retryKey,
                         0
@@ -2709,6 +2865,7 @@ public class TxForegroundService extends Service {
         try {
 
             boolean success =
+
                     sendTrackSmsInternal(
                             sms,
                             retryKey
@@ -2725,28 +2882,43 @@ public class TxForegroundService extends Service {
 
                 if (retry >= MAX_SMS_RETRY) {
 
-                    Log.e("SMS_SEND",
-                            "MAX RETRY REACHED index=" +
-                                    currentIndex);
+                    Log.e(
+                            "SMS_SEND",
+                            "MAX RETRY index="
+                                    +
+                                    currentIndex
+                    );
+
+                    queueProcessing.set(false);
 
                     return;
                 }
 
-                int finalRetry = retry;
+                int finalRetry =
+                        retry;
 
-                txHandler.postDelayed(() -> {
+                txHandler.postDelayed(
+                        () -> {
 
-                    Log.e("SMS_RETRY",
-                            "retry=" + finalRetry);
+                            Log.e(
+                                    "SMS_RETRY",
+                                    "retry="
+                                            +
+                                            finalRetry
+                            );
 
-                    sendNextPart(
-                            parts,
-                            currentIndex + 1,
-                            sessionSnapshot,
-                            finalBatch
-                    );
+                            // RETRY STESSO SMS
+                            sendNextPart(
+                                    parts,
+                                    currentIndex,
+                                    sessionId,
+                                    segmentId,
+                                    stopPending
+                            );
 
-                }, 1500L);
+                        },
+                        1500L
+                );
 
                 return;
             }
@@ -2755,13 +2927,21 @@ public class TxForegroundService extends Service {
             // 🔥 SUCCESS
             // =================================================
 
-            retryMap.remove(retryKey);
+            retryMap.remove(
+                    retryKey
+            );
 
         } catch (Exception e) {
 
-            Log.e("SEQ_ERROR",
-                    "SEND FAILED index=" + currentIndex,
-                    e);
+            Log.e(
+                    "SEQ_ERROR",
+                    "SEND FAILED index="
+                            +
+                            currentIndex,
+                    e
+            );
+
+            queueProcessing.set(false);
 
             return;
         }
@@ -2774,26 +2954,29 @@ public class TxForegroundService extends Service {
 
             finalSmsSent = true;
 
-            Log.e("TRACK",
-                    "FINAL SMS MARKED SENT");
-
-            //completeFinalFlush();
+            Log.e(
+                    "TRACK",
+                    "FINAL SMS MARKED SENT"
+            );
         }
 
         // =====================================================
         // 🔥 NEXT PART
         // =====================================================
 
-        txHandler.postDelayed(() -> {
+        txHandler.postDelayed(
+                () ->
 
-            sendNextPart(
-                    parts,
-                    currentIndex + 1,
-                    sessionSnapshot,
-                    finalBatch
-            );
+                        sendNextPart(
+                                parts,
+                                currentIndex + 1,
+                                sessionId,
+                                segmentId,
+                                stopPending
+                        ),
 
-        }, 450L);
+                450L
+        );
     }
 
 
@@ -2935,8 +3118,8 @@ public class TxForegroundService extends Service {
                         current.isEmpty()) {
 
                     // =========================================
-// 🔥 FINAL EMPTY FLUSH
-// =========================================
+                    // 🔥 FINAL EMPTY FLUSH
+                    // =========================================
 
                     if (isFinalFlush &&
                             !finalSmsSent) {
@@ -2965,6 +3148,7 @@ public class TxForegroundService extends Service {
                         // 🔥 QUEUE FINAL BATCH
                         enqueueSmsBatch(
                                 parts,
+                                0L,
                                 true
                         );
 
@@ -3104,24 +3288,23 @@ public class TxForegroundService extends Service {
                 // 🔥 BUILD TEMP SEGMENT
                 // =============================================
 
-                int startIndex =
-                        Math.max(
-                                0,
-                                fullTrackHistory.size() - 300
-                        );
-
                 List<TrackPointEx> segmentPoints =
-                        new ArrayList<>(
-                                fullTrackHistory.subList(
-                                        startIndex,
-                                        fullTrackHistory.size()
-                                )
-                        );
+                        new ArrayList<>();
+
+                for (TrackPointEx p : fullTrackHistory) {
+
+                    if (p.pointId > lastSentPointId) {
+
+                        segmentPoints.add(p);
+                    }
+                }
 
                 if (segmentPoints.isEmpty()) {
 
-                    Log.d("TX_FLOW",
-                            "NO SEGMENT POINTS");
+                    Log.d(
+                            "TX_FLOW",
+                            "NO NEW POINTS"
+                    );
 
                     return;
                 }
@@ -3152,16 +3335,55 @@ public class TxForegroundService extends Service {
                 segment.retryCount = 0;
 
                 // =============================================
-                // 🔥 PENDING LIMIT
-                // =============================================
+// 🔥 PENDING LIMIT
+// =============================================
 
-                if (pendingSegments.size() >
-                        MAX_PENDING_SEGMENTS) {
+                if (pendingSegments.size() > MAX_PENDING_SEGMENTS) {
 
-                    Log.w("SEGMENT",
-                            "pending overflow → clear");
+                    Log.w(
+                            "SEGMENT",
+                            "pending overflow → remove ACK only"
+                    );
 
-                    pendingSegments.clear();
+                    Iterator<TrackSegment> it =
+                            pendingSegments
+                                    .values()
+                                    .iterator();
+
+                    while (
+                            pendingSegments.size()
+                                    > MAX_PENDING_SEGMENTS
+                                    &&
+                                    it.hasNext()
+                    ) {
+
+                        TrackSegment s =
+                                it.next();
+
+                        if (s != null &&
+                                s.acknowledged) {
+
+                            it.remove();
+
+                            Log.d(
+                                    "SEGMENT",
+                                    "removed ACK segmentId="
+                                            + s.segmentId
+                            );
+                        }
+                    }
+
+                    // fallback sicurezza
+                    if (
+                            pendingSegments.size()
+                                    > MAX_PENDING_SEGMENTS
+                    ) {
+
+                        Log.w(
+                                "SEGMENT",
+                                "overflow unresolved"
+                        );
+                    }
                 }
 
                 pendingSegments.put(
@@ -3378,7 +3600,9 @@ public class TxForegroundService extends Service {
                     "TX|" +
                             currentSessionId +
                             "|999999|" +
-                            "999/999|" +
+                            "|999999999|" +
+                            "|999999999|" +
+                            "|999/999|" +
                             "F|";
 
             int headerLen =
@@ -3597,6 +3821,37 @@ public class TxForegroundService extends Service {
                                 filteredPoints,
                                 res.usedEpsilon
                         );
+                if (!simplifiedPoints.isEmpty()) {
+
+                    LatLng first =
+                            workingPoints.get(0);
+
+                    LatLng last =
+                            workingPoints.get(
+                                    workingPoints.size() - 1
+                            );
+
+                    if (!simplifiedPoints
+                            .get(0)
+                            .equals(first)) {
+
+                        simplifiedPoints.add(
+                                0,
+                                first
+                        );
+                    }
+
+                    if (!simplifiedPoints
+                            .get(
+                                    simplifiedPoints.size() - 1
+                            )
+                            .equals(last)) {
+
+                        simplifiedPoints.add(
+                                last
+                        );
+                    }
+                }
 
                 DebugTrackStore.raw.addAll(
                         workingPoints.subList(
@@ -3760,16 +4015,63 @@ public class TxForegroundService extends Service {
                         isFinal ? "F" : "D";
 
                 String header =
-                        "TX|" +
-                                currentSessionId +
-                                "|" +
-                                segment.segmentId +
-                                "|" +
-                                i +
-                                "/" +
-                                payloadChunks.size() +
-                                "|" +
-                                type +
+
+                        "TX|"
+
+                                +
+
+                                currentSessionId
+
+                                +
+
+                                "|"
+
+                                +
+
+                                segment.segmentId
+
+                                +
+
+                                "|"
+
+                                +
+
+                                segment.startPointId
+
+                                +
+
+                                "|"
+
+                                +
+
+                                segment.endPointId
+
+                                +
+
+                                "|"
+
+                                +
+
+                                i
+
+                                +
+
+                                "/"
+
+                                +
+
+                                payloadChunks.size()
+
+                                +
+
+                                "|"
+
+                                +
+
+                                type
+
+                                +
+
                                 "|";
 
                 String full =
@@ -3830,11 +4132,15 @@ public class TxForegroundService extends Service {
                             " final=" + isRealFinalFlush +
                             " session=" + sessionSnapshot);
 
+            long segmentId =
+                    segment.segmentId;
+
             txHandler.post(() ->
                     sendNextPart(
                             parts,
                             0,
                             sessionSnapshot,
+                            segmentId,
                             isRealFinalFlush
                     )
             );
@@ -3843,17 +4149,22 @@ public class TxForegroundService extends Service {
 
             lastTrackSmsTime = now;
 
-            firstBlockSent = true;
 
-            lastTrackSmsTime = now;
+
+            Log.d(
+                    "TX",
+                    "lastSentPointId="
+                            +
+                            lastSentPointId
+            );
 
             // =================================================
-// 🔥 RESET FLUSH SOLO REALE
-// =================================================
+            // 🔥 RESET FLUSH SOLO REALE
+            // =================================================
 
-// ❌ NON RESETTARE QUI
-// il flush finale termina solo
-// quando tutta la queue TX è realmente vuota
+            // ❌ NON RESETTARE QUI
+            // il flush finale termina solo
+            // quando tutta la queue TX è realmente vuota
 
 /*
 if (isRealFinalFlush) {
