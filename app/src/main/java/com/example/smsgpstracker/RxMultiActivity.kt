@@ -289,6 +289,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                         finalTrackHandled = true
 
+                        Log.e("GPX_TEST", "TRACK COMPLETA RILEVATA")
+
                         Log.e(
                             "RX_FINAL",
                             "TRACK COMPLETA " +
@@ -906,6 +908,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun takeSnapshotWithRetry(attempt: Int) {
 
+        Log.e("GPX_TEST", "takeSnapshotWithRetry attempt=$attempt")
+
         googleMap.snapshot { bitmap ->
 
             if (bitmap == null) {
@@ -942,6 +946,8 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
         val bounds = builder.build()
 
+        Log.e("GPX_TEST", "generateFinalSnapshot()")
+
         googleMap.animateCamera(
             CameraUpdateFactory.newLatLngBounds(bounds, 150),
             3000,
@@ -949,9 +955,13 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 override fun onFinish() {
 
+                    Log.e("GPX_TEST", "animateCamera FINISH")
+
                     drawAllPoints()
 
                     googleMap.setOnMapLoadedCallback {
+
+                        Log.e("GPX_TEST", "MAP LOADED CALLBACK")
 
                         Log.d("SNAPSHOT", "MAP LOADED")
 
@@ -980,6 +990,7 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun takeSnapshot() {
 
+        Log.e("GPX_TEST", "takeSnapshot()")
         Log.d("DEBUG_SNAPSHOT", "trackPoints: ${trackPoints.size}")
         Log.d("DEBUG_SNAPSHOT", "manualPoints: ${manualPoints.size}")
         Log.d("DEBUG_SNAPSHOT", "emergencyPoints: ${emergencyPoints.size}")
@@ -1148,6 +1159,11 @@ class RxMultiActivity : AppCompatActivity(), OnMapReadyCallback {
             drawInfoOverlay(canvas, bitmap)
 
             saveFinalBitmap(bitmap)
+
+            Log.e("GPX_TEST", "CHIAMO saveGpxTrack()")
+
+            saveGpxTrack()
+            saveKmlTrack()
         }
     }
 
@@ -1182,7 +1198,7 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
         val paint = Paint().apply {
             color = Color.BLACK
-            textSize = 42f
+            textSize = 32f
             isAntiAlias = true
             isFakeBoldText = true
             setShadowLayer(4f, 2f, 2f, Color.WHITE)
@@ -1192,7 +1208,7 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
         text.split("\n").forEach {
             canvas.drawText(it, 30f, y, paint)
-            y += 48f
+            y += 38f
         }
     }
     private fun generateFileName(lat: Double?, lon: Double?): String {
@@ -1276,102 +1292,143 @@ ${"%.6f".format(last.latitude)}, ${"%.6f".format(last.longitude)}
 
             Log.d("SNAPSHOT", "SALVATO OK: $filename")
 
-            saveTrackAsGpx()
+
 
         } catch (e: Exception) {
             Log.e("SNAPSHOT", "ERRORE SALVATAGGIO", e)
         }
     }
-    private fun saveTrackAsGpx() {
+    private fun saveGpxTrack() {
+
+        Log.e("GPX", "========== SAVE GPX START ==========")
 
         try {
 
-            if (trackPoints.isEmpty()) {
-                Log.e("GPX", "Track vuota")
+            if (trackPoints.size < 2) {
+
+                Log.e(
+                    "GPX",
+                    "Track insufficiente (${trackPoints.size} punti)"
+                )
+
                 return
             }
 
-            val lastPoint = trackPoints.lastOrNull()
+            val last = trackPoints.last()
 
-            val lat = lastPoint?.latitude
-            val lon = lastPoint?.longitude
+            val filename = generateFileName(
+                last.latitude,
+                last.longitude
+            ).replace(".jpg", ".gpx")
 
-            val filename =
-                generateFileName(lat, lon)
-                    .replace(".jpg", ".gpx")
+            Log.e("GPX", "Filename = $filename")
 
-            val gpx = StringBuilder()
+            // =====================================================
+            // COSTRUZIONE GPX
+            // =====================================================
 
-            gpx.append("""<?xml version="1.0" encoding="UTF-8"?>""")
-            gpx.append("\n")
+            val gpxContent = buildString {
 
-            gpx.append("""
-<gpx version="1.1"
-creator="SMSTracker"
-xmlns="http://www.topografix.com/GPX/1/1">
-""".trimIndent())
+                appendLine("""<?xml version="1.0" encoding="UTF-8"?>""")
 
-            gpx.append("\n<trk>\n")
-            gpx.append("<name>SMSTracker Track</name>\n")
-            gpx.append("<trkseg>\n")
-
-            trackPoints.forEach { point ->
-
-                gpx.append(
+                appendLine(
                     """
-<trkpt lat="${point.latitude}" lon="${point.longitude}"></trkpt>
-""".trimIndent()
+<gpx
+    version="1.1"
+    creator="SmsGpsTracker"
+    xmlns="http://www.topografix.com/GPX/1/1">
+
+<trk>
+    <name>SMS GPS TRACK</name>
+
+    <trkseg>
+                """.trimIndent()
                 )
 
-                gpx.append("\n")
+                trackPoints.forEach { point ->
+
+                    appendLine(
+                        """
+<trkpt lat="${point.latitude}" lon="${point.longitude}" />
+                    """.trimIndent()
+                    )
+                }
+
+                appendLine(
+                    """
+    </trkseg>
+
+</trk>
+
+</gpx>
+                """.trimIndent()
+                )
             }
 
-            gpx.append("</trkseg>\n")
-            gpx.append("</trk>\n")
-            gpx.append("</gpx>\n")
+            Log.e(
+                "GPX",
+                "GPX creato con ${trackPoints.size} punti"
+            )
+
+            // =====================================================
+            // ANDROID 10+
+            // =====================================================
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 
                 val resolver = contentResolver
 
-                val contentValues = ContentValues().apply {
+                val values = ContentValues().apply {
 
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(
+                        MediaStore.MediaColumns.DISPLAY_NAME,
+                        filename
+                    )
 
                     put(
                         MediaStore.MediaColumns.MIME_TYPE,
-                        "application/gpx+xml"
+                        "application/octet-stream"
                     )
 
                     put(
                         MediaStore.MediaColumns.RELATIVE_PATH,
-                        "Pictures/SMSTracker"
+                        "Documents/SMSTracker"
                     )
                 }
 
                 val uri = resolver.insert(
                     MediaStore.Files.getContentUri("external"),
-                    contentValues
+                    values
                 )
 
-                uri?.let {
+                if (uri == null) {
 
-                    resolver.openOutputStream(it)?.use { output ->
+                    Log.e("GPX", "URI NULL")
 
-                        BufferedWriter(
-                            OutputStreamWriter(output)
-                        ).use { writer ->
-
-                            writer.write(gpx.toString())
-                        }
-                    }
+                    return
                 }
 
-            } else {
+                resolver.openOutputStream(uri)?.use { stream ->
+
+                    stream.write(
+                        gpxContent.toByteArray(Charsets.UTF_8)
+                    )
+
+                    stream.flush()
+                }
+
+                Log.e("GPX", "Scrittura completata")
+            }
+
+            // =====================================================
+            // ANDROID 9 E PRECEDENTI
+            // =====================================================
+
+            else {
 
                 val dir = File(
                     Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_PICTURES
+                        Environment.DIRECTORY_DOCUMENTS
                     ),
                     "SMSTracker"
                 )
@@ -1382,12 +1439,10 @@ xmlns="http://www.topografix.com/GPX/1/1">
 
                 val file = File(dir, filename)
 
-                BufferedWriter(
-                    FileOutputStream(file).writer()
-                ).use { writer ->
-
-                    writer.write(gpx.toString())
-                }
+                file.writeText(
+                    gpxContent,
+                    Charsets.UTF_8
+                )
 
                 sendBroadcast(
                     Intent(
@@ -1395,13 +1450,222 @@ xmlns="http://www.topografix.com/GPX/1/1">
                         Uri.fromFile(file)
                     )
                 )
+
+                Log.e(
+                    "GPX",
+                    "File salvato: ${file.absolutePath}"
+                )
             }
 
-            Log.d("GPX", "GPX SALVATO: $filename")
+            Log.e(
+                "GPX",
+                "GPX SALVATO OK: $filename"
+            )
+
+            Log.e(
+                "GPX",
+                "========== SAVE GPX END =========="
+            )
 
         } catch (e: Exception) {
 
-            Log.e("GPX", "ERRORE GPX", e)
+            Log.e(
+                "GPX",
+                "ERRORE EXPORT GPX",
+                e
+            )
+        }
+    }
+
+    private fun saveKmlTrack() {
+
+        Log.e("KML", "========== SAVE KML START ==========")
+
+        try {
+
+            if (trackPoints.size < 2) {
+
+                Log.e(
+                    "KML",
+                    "Track insufficiente (${trackPoints.size} punti)"
+                )
+
+                return
+            }
+
+            val last = trackPoints.last()
+
+            val filename = generateFileName(
+                last.latitude,
+                last.longitude
+            ).replace(".jpg", ".kml")
+
+            Log.e("KML", "Filename = $filename")
+
+            val start = trackPoints.first()
+            val end = trackPoints.last()
+
+            val coordinates = buildString {
+
+                trackPoints.forEach { point ->
+
+                    append(
+                        "${point.longitude},${point.latitude},0 "
+                    )
+                }
+            }
+
+            val kmlContent = """
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+
+<Document>
+
+    <name>SMS GPS TRACK</name>
+
+    <Style id="trackStyle">
+        <LineStyle>
+            <color>ff0000ff</color>
+            <width>4</width>
+        </LineStyle>
+    </Style>
+
+    <Placemark>
+        <name>START</name>
+        <Point>
+            <coordinates>
+                ${start.longitude},${start.latitude},0
+            </coordinates>
+        </Point>
+    </Placemark>
+
+    <Placemark>
+        <name>END</name>
+        <Point>
+            <coordinates>
+                ${end.longitude},${end.latitude},0
+            </coordinates>
+        </Point>
+    </Placemark>
+
+    <Placemark>
+
+        <name>SMS GPS TRACK</name>
+
+        <styleUrl>#trackStyle</styleUrl>
+
+        <LineString>
+
+            <tessellate>1</tessellate>
+
+            <coordinates>
+                $coordinates
+            </coordinates>
+
+        </LineString>
+
+    </Placemark>
+
+</Document>
+
+</kml>
+        """.trimIndent()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+                val resolver = contentResolver
+
+                val values = ContentValues().apply {
+
+                    put(
+                        MediaStore.MediaColumns.DISPLAY_NAME,
+                        filename
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        "application/vnd.google-earth.kml+xml"
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        "Documents/SMSTracker"
+                    )
+                }
+
+                val uri = resolver.insert(
+                    MediaStore.Files.getContentUri("external"),
+                    values
+                )
+
+                if (uri == null) {
+
+                    Log.e("KML", "URI NULL")
+
+                    return
+                }
+
+                resolver.openOutputStream(uri)?.use {
+
+                    it.write(
+                        kmlContent.toByteArray(Charsets.UTF_8)
+                    )
+
+                    it.flush()
+                }
+
+                Log.e("KML", "Scrittura completata")
+            }
+            else {
+
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOCUMENTS
+                    ),
+                    "SMSTracker"
+                )
+
+                if (!dir.exists()) {
+                    dir.mkdirs()
+                }
+
+                val file = File(dir, filename)
+
+                file.writeText(
+                    kmlContent,
+                    Charsets.UTF_8
+                )
+
+                sendBroadcast(
+                    Intent(
+                        Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
+                        Uri.fromFile(file)
+                    )
+                )
+
+                Log.e(
+                    "KML",
+                    "File salvato: ${file.absolutePath}"
+                )
+            }
+
+            Log.e(
+                "KML",
+                "KML SALVATO OK: $filename"
+            )
+
+            Log.e(
+                "KML",
+                "========== SAVE KML END =========="
+            )
+
+        } catch (e: Exception) {
+
+            Log.e(
+                "KML",
+                "ERRORE EXPORT KML",
+                e
+            )
         }
     }
 

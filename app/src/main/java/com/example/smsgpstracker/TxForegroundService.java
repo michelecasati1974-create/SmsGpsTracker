@@ -3688,11 +3688,11 @@ public class TxForegroundService extends Service {
 
                 if (smsLen > 140) {
 
-                    tolerance *= 1.6f;
+                    tolerance *= 1.15f;
 
-                } else if (smsLen < 100) {
+                } else if (smsLen < 110) {
 
-                    tolerance *= 0.6f;
+                    tolerance *= 0.92f;
 
                 } else {
 
